@@ -36,3 +36,9 @@ configs/dram/lowp_sweep.cfg
 .vscode
 typings
 .DS_Store
+
+# Ignore Spec
+x86_spec/scpc_x86.img
+x86_spec/scpc_x86.tar.gz
+x86_spec/vmlinux-5.2.3
+x86_spec/spec_cpu_scripts
