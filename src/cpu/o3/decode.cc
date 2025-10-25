@@ -693,6 +693,9 @@ Decode::decodeInsts(ThreadID tid)
             inst->decodeTick = curTick() - inst->fetchTick;
         }
 #endif
+        if (inst->fetchCycle != Cycles(-1)) {
+            inst->decodeCycle = Cycles(cpu->baseStats.numCycles.value()) - inst->fetchCycle;
+        }
 
         // Ensure that if it was predicted as a branch, it really is a
         // branch.

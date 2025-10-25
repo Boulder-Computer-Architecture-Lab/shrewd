@@ -131,6 +131,8 @@ class FUPool : public SimObject
     /** Functional units. */
     std::vector<FuncUnit *> funcUnits;
 
+    int findFreeUnit(OpClass capability);
+
   public:
     typedef FUPoolParams Params;
     /** Constructs a FU pool. */
@@ -142,6 +144,8 @@ class FUPool : public SimObject
      * instruction asked the FUPool for a free FU
      * but did not get one
      */
+
+    static constexpr auto NoShadowFU = -7;
 
     /**
      * Instruction asked for a FU but does not actually
@@ -168,11 +172,12 @@ class FUPool : public SimObject
      * stage.
      *
      * @param capability The capability requested.
+     * @param is_shadow True if this is a shadow instruction, used to check the result.
      * @return Returns NoCapableFU if the FU pool does not have the
      * capability, NoFreeFU if there is no free FU, and the FU's index
      * otherwise.
      */
-    int getUnit(OpClass capability);
+    int getUnit(OpClass capability, bool is_shadow, OpClass &approx_capability);
 
     /** Frees a FU at the end of this cycle. */
     void freeUnitNextCycle(int fu_idx);

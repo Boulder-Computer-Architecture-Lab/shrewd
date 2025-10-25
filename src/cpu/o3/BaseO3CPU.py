@@ -66,6 +66,10 @@ class BaseO3CPU(BaseCPU):
     cxx_class = "gem5::o3::CPU"
     cxx_header = "cpu/o3/dyn_inst.hh"
 
+    cxx_exports = [
+        PyBindMethod("setEnableShrewd"),
+    ]
+
     @classmethod
     def memory_mode(cls):
         return "timing"
@@ -217,3 +221,5 @@ class BaseO3CPU(BaseCPU):
     recvRespBufferSize = Param.Unsigned(
         64, "Maximum number of receive response bytes per cycle"
     )
+
+    enableShrewd = Param.Bool(False, "Enable SHREWD features")

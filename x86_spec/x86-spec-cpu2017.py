@@ -158,7 +158,7 @@ fast_forward_count =  {
         "508.namd_r" : 10_000_000_000,
         "510.parest_r" : 10_000_000_000,
         "511.povray_r" : 10_000_000_000,
-        "519.lbm_r" : 10_000_000_000,
+        "519.lbm_r" : 1_000_000_000,
         "520.omnetpp_r" : 10_000_000_000,
         "523.xalancbmk_r" : 10_000_000_000,
         "526.blender_r" : 10_000_000_000,
@@ -304,6 +304,11 @@ parser.add_argument(
     help="timer frequency to use for the kernel and checkpoint",
 )
 
+parser.add_argument(
+    "--enableShrewd",
+    action="store_true",
+    help="Enable special instruction queue functionality",
+)
 
 args = parser.parse_args()
 
@@ -396,6 +401,24 @@ instruction_counts = [fast_forward_inst, 30_000_000_000]
 def start_accurate_sim():
     print("\t==========\n\tswitched cpus\n\t==========\n\t")
     processor.switch()
+    # Re-set enableShrewd after switching to O3 CPU
+    print(f"DEBUG: Attempting to set enableShrewd = {args.enableShrewd}")
+    for core in processor.get_cores():
+        print(f"DEBUG: Processing core: {core}")
+        try:
+            print(f"DEBUG: core.core = {core.core}")
+            cpp_core = core.core.getCCObject()
+            print(f"DEBUG: cpp_core = {cpp_core}")
+            if hasattr(cpp_core, 'setEnableShrewd'):
+                print(f"DEBUG: Found setEnableShrewd method, calling it...")
+                cpp_core.setEnableShrewd(args.enableShrewd)
+                print(f"DEBUG: Successfully set enableShrewd = {args.enableShrewd} after CPU switch")
+            else:
+                print(f"DEBUG: cpp_core does not have setEnableShrewd method")
+        except AttributeError as e:
+            print(f"DEBUG: AttributeError: {e}")
+        except Exception as e:
+            print(f"DEBUG: Unexpected error: {type(e).__name__}: {e}")
     m5.stats.reset()
     simulator.schedule_max_insts(instruction_counts[1])
     yield False
@@ -417,6 +440,7 @@ simulator = Simulator(
 )
 
 print(f"running {args.benchmark}.rcS")
+print(f"DEBUG: Initial args.enableShrewd value = {args.enableShrewd}")
 #simulator.defense(args.defense)
 #simulator.maxIntsProcess(args.maxIntsProcess)
 #simulator.invalidateCounter(args.invalidateCounter)

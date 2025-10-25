@@ -153,14 +153,8 @@ FUPool::FUPool(const Params &p)
     }
 }
 
-int
-FUPool::getUnit(OpClass capability)
+int FUPool::findFreeUnit(OpClass capability)
 {
-    //  If this pool doesn't have the specified capability,
-    //  return this information to the caller
-    if (!capabilityList[capability])
-        return NoCapableFU;
-
     int fu_idx = fuPerCapList[capability].getFU();
     int start_idx = fu_idx;
 
@@ -176,6 +170,131 @@ FUPool::getUnit(OpClass capability)
 
     assert(fu_idx < numFU);
 
+    return fu_idx;
+}
+
+int
+FUPool::getUnit(OpClass capability, bool is_shadow, OpClass &approx_capability)
+{
+    //  If this pool doesn't have the specified capability,
+    //  return this information to the caller
+    if (!capabilityList[capability])
+        return NoCapableFU;
+
+    int fu_idx = NoFreeFU;
+    int fu_idx_aux = NoFreeFU;
+    int fu_idx_aux_2 = NoFreeFU;
+
+    approx_capability = capability;
+
+    if (is_shadow)
+    {
+        switch (capability)
+        {
+            case OpClass::IntAlu:
+                fu_idx = findFreeUnit(capability);
+                fu_idx_aux = findFreeUnit(OpClass::FloatAdd);
+                fu_idx_aux_2 = findFreeUnit(OpClass::FloatCmp);
+
+                if (fu_idx == NoFreeFU)
+                {
+                    fu_idx = fu_idx_aux;
+                    approx_capability = OpClass::FloatAdd;
+                    if (fu_idx_aux == NoFreeFU)
+                    {
+                        approx_capability = OpClass::FloatCmp;
+                        fu_idx = fu_idx_aux_2;
+                    }
+                }
+                    
+                break;
+            case OpClass::IntMult:
+                fu_idx = findFreeUnit(capability);
+                fu_idx_aux = findFreeUnit(OpClass::FloatMult);
+
+                if (fu_idx == NoFreeFU)
+                {
+                    approx_capability = OpClass::FloatMult;
+                    fu_idx = fu_idx_aux;
+                }
+
+                break;
+            case OpClass::IntDiv:
+                fu_idx = findFreeUnit(capability);
+                fu_idx_aux = findFreeUnit(OpClass::FloatDiv);
+                
+                if (fu_idx == NoFreeFU)
+                {
+                    approx_capability = OpClass::FloatDiv;
+                    fu_idx = fu_idx_aux;
+                }
+
+                break;
+            case OpClass::FloatAdd:
+                fu_idx = findFreeUnit(capability);
+                fu_idx_aux = findFreeUnit(OpClass::IntAlu);
+                
+                if (fu_idx == NoFreeFU)
+                {
+                    approx_capability = OpClass::IntAlu;
+                    fu_idx = fu_idx_aux;
+                }
+
+                break;
+            case OpClass::FloatMult:
+                fu_idx = findFreeUnit(capability);
+                fu_idx_aux = findFreeUnit(OpClass::IntAlu);
+                
+                if (fu_idx == NoFreeFU)
+                {
+                    approx_capability = OpClass::IntAlu;
+                    fu_idx = fu_idx_aux;
+                }
+
+                break;
+            case OpClass::FloatDiv:
+                fu_idx = findFreeUnit(capability);
+                fu_idx_aux = findFreeUnit(OpClass::IntAlu);
+                
+                if (fu_idx == NoFreeFU)
+                {
+                    approx_capability = OpClass::IntAlu;
+                    fu_idx = fu_idx_aux;
+                }
+
+                break;
+            case OpClass::FloatSqrt:
+                fu_idx = findFreeUnit(capability);
+                fu_idx_aux = findFreeUnit(OpClass::IntAlu);
+                
+                if (fu_idx == NoFreeFU)
+                {
+                    approx_capability = OpClass::IntAlu;
+                    fu_idx = fu_idx_aux;
+                }
+                    
+                break;
+            case OpClass::FloatMultAcc:
+            case OpClass::FloatCvt:
+            case OpClass::FloatCmp:
+            case OpClass::FloatMisc:
+                fu_idx = findFreeUnit(capability);
+                break;
+            default:
+                fu_idx = NoShadowFU;
+                break;
+        }
+    }
+    else
+    {
+        fu_idx = findFreeUnit(capability);
+    }
+
+    if (fu_idx == NoShadowFU)
+        return NoShadowFU;
+    else if (fu_idx == NoFreeFU)
+        return NoFreeFU;
+        
     unitBusy[fu_idx] = true;
 
     return fu_idx;

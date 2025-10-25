@@ -78,7 +78,7 @@ class X86DemoBoard(X86Board):
         # support up to 3 GiB.
         memory = DualChannelDDR4_2400(size="3GiB")
         processor = SimpleProcessor(
-            cpu_type=CPUTypes.TIMING, isa=ISA.X86, num_cores=2
+            cpu_type=CPUTypes.O3, isa=ISA.X86, num_cores=2
         )
 
         cache_hierarchy = PrivateL1SharedL2CacheHierarchy(

@@ -94,6 +94,7 @@ InstructionQueue::InstructionQueue(CPU *cpu_ptr, IEW *iew_ptr,
       numEntries(params.numIQEntries),
       totalWidth(params.issueWidth),
       commitToIEWDelay(params.commitToIEWDelay),
+      enableShrewd(params.enableShrewd),
       iqStats(cpu, totalWidth),
       iqIOStats(cpu)
 {
@@ -350,7 +351,59 @@ InstructionQueue::IQIOStats::IQIOStats(statistics::Group *parent)
     ADD_STAT(fpAluAccesses, statistics::units::Count::get(),
              "Number of floating point alu accesses"),
     ADD_STAT(vecAluAccesses, statistics::units::Count::get(),
-             "Number of vector alu accesses")
+             "Number of vector alu accesses"),
+    ADD_STAT(shadowAvailable, statistics::units::Count::get(),
+             "Number of available FU for shadow"),
+    ADD_STAT(shadowNotAvailable, statistics::units::Count::get(),
+             "Number of unavailable FU for shadow"),
+    ADD_STAT(IntAluShadowAvailable, statistics::units::Count::get(),
+             "Number of available FU for shadow IntAlu"),
+    ADD_STAT(IntAluShadowNotAvailable, statistics::units::Count::get(),
+             "Number of unavailable FU for shadow IntAlu"),
+    ADD_STAT(IntMultShadowAvailable, statistics::units::Count::get(),
+             "Number of available FU for shadow IntMult"),
+    ADD_STAT(IntMultShadowNotAvailable, statistics::units::Count::get(),
+             "Number of unavailable FU for shadow IntMult"),
+    ADD_STAT(IntDivShadowAvailable, statistics::units::Count::get(),
+             "Number of available FU for shadow IntDiv"),
+    ADD_STAT(IntDivShadowNotAvailable, statistics::units::Count::get(),
+             "Number of unavailable FU for shadow IntDiv"),
+    ADD_STAT(FloatAddShadowAvailable, statistics::units::Count::get(),
+             "Number of available FU for shadow FloatAdd"),
+    ADD_STAT(FloatAddShadowNotAvailable, statistics::units::Count::get(),
+             "Number of unavailable FU for shadow FloatAdd"),
+    ADD_STAT(FloatMultShadowAvailable, statistics::units::Count::get(),
+             "Number of available FU for shadow FloatMult"),
+    ADD_STAT(FloatMultShadowNotAvailable, statistics::units::Count::get(),
+             "Number of unavailable FU for shadow FloatMult"),
+    ADD_STAT(FloatDivShadowAvailable, statistics::units::Count::get(),
+             "Number of available FU for shadow FloatDiv"),
+    ADD_STAT(FloatDivShadowNotAvailable, statistics::units::Count::get(),
+             "Number of unavailable FU for shadow FloatDiv"),
+    ADD_STAT(FloatSqrtShadowAvailable, statistics::units::Count::get(),
+             "Number of available FU for shadow FloatSqrt"),
+    ADD_STAT(FloatSqrtShadowNotAvailable, statistics::units::Count::get(),
+             "Number of unavailable FU for shadow FloatSqrt"),
+    ADD_STAT(FloatMultAccShadowAvailable, statistics::units::Count::get(),
+             "Number of available FU for shadow FloatMultAcc"),
+    ADD_STAT(FloatMultAccShadowNotAvailable, statistics::units::Count::get(),
+             "Number of unavailable FU for shadow FloatMultAcc"),
+    ADD_STAT(FloatCvtShadowAvailable, statistics::units::Count::get(),
+             "Number of available FU for shadow FloatCvt"),
+    ADD_STAT(FloatCvtShadowNotAvailable, statistics::units::Count::get(),
+             "Number of unavailable FU for shadow FloatCvt"),
+    ADD_STAT(FloatCmpShadowAvailable, statistics::units::Count::get(),
+             "Number of available FU for shadow FloatCmp"),
+    ADD_STAT(FloatCmpShadowNotAvailable, statistics::units::Count::get(),
+             "Number of unavailable FU for shadow FloatCmp"),
+    ADD_STAT(FloatMiscShadowAvailable, statistics::units::Count::get(),
+             "Number of available FU for shadow FloatMisc"),
+    ADD_STAT(FloatMiscShadowNotAvailable, statistics::units::Count::get(),
+             "Number of unavailable FU for shadow FloatMisc"),
+    ADD_STAT(ShadowIsSameFU, statistics::units::Count::get(),
+             "Did shadow acquire the same FU."),
+    ADD_STAT(ShadowIsNotSameFU, statistics::units::Count::get(),
+             "Did shadow not acquire the same FU.")
 {
     using namespace statistics;
     intInstQueueReads
@@ -593,6 +646,7 @@ InstructionQueue::insert(const DynInstPtr &new_inst)
     }
 
     ++iqStats.instsAdded;
+    
 
     count[new_inst->threadNumber]++;
 
@@ -726,12 +780,15 @@ InstructionQueue::processFUCompletion(const DynInstPtr &inst, int fu_idx)
     DPRINTF(IQ, "Processing FU completion [sn:%llu]\n", inst->seqNum);
     assert(!cpu->switchedOut());
     // The CPU could have been sleeping until this op completed (*extremely*
-    // long latency op).  Wake it if it was.  This may be overkill.
+    // long latency op).  Wake it if it was.  This may be overkill.        
    --wbOutstanding;
     iewStage->wakeCPU();
 
     if (fu_idx > -1)
         fuPool->freeUnitNextCycle(fu_idx);
+
+    if (inst == NULL)
+        return;
 
     // @todo: Ensure that these FU Completions happen at the beginning
     // of a cycle, otherwise they could add too many instructions to
@@ -812,7 +869,7 @@ InstructionQueue::scheduleReadyInsts()
         ThreadID tid = issuing_inst->threadNumber;
 
         if (op_class != No_OpClass) {
-            idx = fuPool->getUnit(op_class);
+            idx = fuPool->getUnit(op_class, /* is_shadow? */ false, op_class);
             if (issuing_inst->isFloating()) {
                 iqIOStats.fpAluAccesses++;
             } else if (issuing_inst->isVector()) {
@@ -825,10 +882,110 @@ InstructionQueue::scheduleReadyInsts()
             }
         }
 
+        int idx_shadow = FUPool::NoNeedFU;
+        bool has_shadow = false;
+        OpClass shadow_op_class = op_class;
+        if(enableShrewd){
+        // Ask for shadow unit to check the result.
+        if (idx != FUPool::NoFreeFU && idx != FUPool::NoCapableFU) {
+            idx_shadow = fuPool->getUnit(op_class, true, shadow_op_class);
+            
+            if (idx_shadow != FUPool::NoShadowFU && idx != FUPool::NoCapableFU)
+            {
+                if (idx_shadow != FUPool::NoFreeFU) {
+                    has_shadow = true;
+                    iqIOStats.shadowAvailable++;
+
+                    //TODO Change when we have a buffer.
+                    op_latency = std::max(op_latency, fuPool->getOpLatency(shadow_op_class));
+
+                    if (op_class == shadow_op_class)
+                        iqIOStats.ShadowIsSameFU++;
+                    else
+                        iqIOStats.ShadowIsNotSameFU++;
+                }
+                else
+                {
+                    iqIOStats.shadowNotAvailable++;
+                }
+
+                switch (op_class)
+                {
+                    case OpClass::IntAlu:
+                        if (has_shadow)
+                            iqIOStats.IntAluShadowAvailable++;
+                        else
+                            iqIOStats.IntAluShadowNotAvailable++;
+                        break;
+                    case OpClass::IntMult:
+                        if (has_shadow)
+                            iqIOStats.IntMultShadowAvailable++;
+                        else
+                            iqIOStats.IntMultShadowNotAvailable++;
+                        break;
+                    case OpClass::IntDiv:
+                        if (has_shadow)
+                            iqIOStats.IntDivShadowAvailable++;
+                        else
+                            iqIOStats.IntDivShadowNotAvailable++;
+                        break;
+                    case OpClass::FloatAdd:
+                        if (has_shadow)
+                            iqIOStats.FloatAddShadowAvailable++;
+                        else
+                            iqIOStats.FloatAddShadowNotAvailable++;
+                        break;
+                    case OpClass::FloatMult:
+                        if (has_shadow)
+                            iqIOStats.FloatMultShadowAvailable++;
+                        else
+                            iqIOStats.FloatMultShadowNotAvailable++;
+                        break;
+                    case OpClass::FloatDiv:
+                        if (has_shadow)
+                            iqIOStats.FloatDivShadowAvailable++;
+                        else
+                            iqIOStats.FloatDivShadowNotAvailable++;
+                        break;
+                    case OpClass::FloatSqrt:
+                        if (has_shadow)
+                            iqIOStats.FloatSqrtShadowAvailable++;
+                        else
+                            iqIOStats.FloatSqrtShadowNotAvailable++;
+                        break;
+                    case OpClass::FloatMultAcc:
+                        if (has_shadow)
+                            iqIOStats.FloatMultAccShadowAvailable++;
+                        else
+                            iqIOStats.FloatMultAccShadowNotAvailable++;
+                        break;
+                    case OpClass::FloatCvt:
+                        if (has_shadow)
+                            iqIOStats.FloatCvtShadowAvailable++;
+                        else
+                            iqIOStats.FloatCvtShadowNotAvailable++;
+                        break;
+                    case OpClass::FloatCmp:
+                        if (has_shadow)
+                            iqIOStats.FloatCmpShadowAvailable++;
+                        else
+                            iqIOStats.FloatCmpShadowNotAvailable++;
+                        break;
+                    case OpClass::FloatMisc:
+                        if (has_shadow)
+                            iqIOStats.FloatMiscShadowAvailable++;
+                        else
+                            iqIOStats.FloatMiscShadowNotAvailable++;
+                        break;
+                    default:
+                        break;
+                }
+            }
+        }
+    }
         // If we have an instruction that doesn't require a FU, or a
         // valid FU, then schedule for execution.
-        if (idx > FUPool::NoFreeFU || idx == FUPool::NoNeedFU ||
-            idx == FUPool::NoCapableFU) {
+        if (idx > FUPool::NoFreeFU || idx == FUPool::NoNeedFU || idx == FUPool::NoCapableFU) {
             if (op_latency == Cycles(1)) {
                 i2e_info->size++;
                 instsToExecute.push_back(issuing_inst);
@@ -836,7 +993,12 @@ InstructionQueue::scheduleReadyInsts()
                 // Add the FU onto the list of FU's to be freed next
                 // cycle if we used one.
                 if (idx >= 0)
+                {
                     fuPool->freeUnitNextCycle(idx);
+
+                    if (has_shadow)
+                        fuPool->freeUnitNextCycle(idx_shadow);
+                }
 
                 // CPU has no capable FU for the instruction
                 // but this may be OK if the instruction gets
@@ -851,11 +1013,9 @@ InstructionQueue::scheduleReadyInsts()
                 bool pipelined = fuPool->isPipelined(op_class);
                 // Generate completion event for the FU
                 ++wbOutstanding;
-                FUCompletion *execution = new FUCompletion(issuing_inst,
-                                                           idx, this);
+                FUCompletion *execution = new FUCompletion(issuing_inst, idx, this);
 
-                cpu->schedule(execution,
-                              cpu->clockEdge(Cycles(op_latency - 1)));
+                cpu->schedule(execution, cpu->clockEdge(Cycles(op_latency - 1)));
 
                 if (!pipelined) {
                     // If FU isn't pipelined, then it must be freed
@@ -864,6 +1024,24 @@ InstructionQueue::scheduleReadyInsts()
                 } else {
                     // Add the FU onto the list of FU's to be freed next cycle.
                     fuPool->freeUnitNextCycle(idx);
+                }
+
+                if (has_shadow)
+                {
+                    ++wbOutstanding;
+                    bool shadow_pipelined = fuPool->isPipelined(shadow_op_class);
+                    FUCompletion *execution_shadow = new FUCompletion(NULL, idx_shadow, this);
+
+                    cpu->schedule(execution_shadow, cpu->clockEdge(Cycles(op_latency - 1)));
+
+                    if (!shadow_pipelined) {
+                        // If FU isn't pipelined, then it must be freed
+                        // upon the execution completing.
+                        execution_shadow->setFreeFU();
+                    } else {
+                        // Add the FU onto the list of FU's to be freed next cycle.
+                        fuPool->freeUnitNextCycle(idx_shadow);
+                    }
                 }
             }
 
@@ -887,6 +1065,14 @@ InstructionQueue::scheduleReadyInsts()
 #if TRACING_ON
             issuing_inst->issueTick = curTick() - issuing_inst->fetchTick;
 #endif
+            if (issuing_inst->fetchCycle != Cycles(-1)) {
+                issuing_inst->issueCycle = Cycles(cpu->baseStats.numCycles.value()) - issuing_inst->fetchCycle;
+            }
+            // Update IEW stats for average issue latency (ready to issue)
+            if (issuing_inst->readyCycle != Cycles(-1)) {
+                Cycles ready_to_issue_latency = Cycles(cpu->baseStats.numCycles.value()) - issuing_inst->readyCycle;
+                iewStage->updateIssueLatencyStats(ready_to_issue_latency);
+            }
 
             if (issuing_inst->firstIssue == -1)
                 issuing_inst->firstIssue = curTick();
@@ -1449,6 +1635,9 @@ InstructionQueue::addIfReady(const DynInstPtr &inst)
         DPRINTF(IQ, "Instruction is ready to issue, putting it onto "
                 "the ready list, PC %s opclass:%i [sn:%llu].\n",
                 inst->pcState(), op_class, inst->seqNum);
+
+        // Record the cycle when the instruction becomes ready
+        inst->readyCycle = Cycles(cpu->baseStats.numCycles.value());
 
         readyInsts[op_class].push(inst);
 

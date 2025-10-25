@@ -188,7 +188,14 @@ IEW::IEWStats::IEWStats(CPU *cpu)
              "Insts written-back per cycle"),
     ADD_STAT(wbFanout, statistics::units::Rate<
                 statistics::units::Count, statistics::units::Count>::get(),
-             "Average fanout of values written-back")
+             "Average fanout of values written-back"),
+    ADD_STAT(totalIssueCycles, statistics::units::Cycle::get(),
+             "Total issue latency in cycles (ready to issue)"),
+    ADD_STAT(numIssuedInsts, statistics::units::Count::get(),
+             "Number of instructions issued"),
+    ADD_STAT(avgIssueCycles, statistics::units::Rate<
+                statistics::units::Cycle, statistics::units::Count>::get(),
+             "Average issue latency in cycles (ready to issue)")
 {
     instsToCommit
         .init(cpu->numThreads)
@@ -213,6 +220,10 @@ IEW::IEWStats::IEWStats(CPU *cpu)
     wbFanout
         .flags(statistics::total);
     wbFanout = producerInst / consumerInst;
+    
+    avgIssueCycles
+        .flags(statistics::total);
+    avgIssueCycles = totalIssueCycles / numIssuedInsts;
 }
 
 IEW::IEWStats::ExecutedInstStats::ExecutedInstStats(CPU *cpu)
@@ -1063,7 +1074,9 @@ IEW::dispatchInsts(ThreadID tid)
         // If the instruction queue is not full, then add the
         // instruction.
         if (add_to_iq) {
+
             instQueue.insert(inst);
+            
         }
 
         insts_to_dispatch.pop();
@@ -1075,6 +1088,9 @@ IEW::dispatchInsts(ThreadID tid)
 #if TRACING_ON
         inst->dispatchTick = curTick() - inst->fetchTick;
 #endif
+        if (inst->fetchCycle != Cycles(-1)) {
+            inst->dispatchCycle = Cycles(cpu->baseStats.numCycles.value()) - inst->fetchCycle;
+        }
         ppDispatch->notify(inst);
     }
 
@@ -1539,6 +1555,9 @@ IEW::updateExeInstStats(const DynInstPtr& inst)
         inst->completeTick = curTick() - inst->fetchTick;
     }
 #endif
+    if (inst->fetchCycle != Cycles(-1)) {
+        inst->completeCycle = Cycles(cpu->baseStats.numCycles.value()) - inst->fetchCycle;
+    }
 
     //
     //  Control operations

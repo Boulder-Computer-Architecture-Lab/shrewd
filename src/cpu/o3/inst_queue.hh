@@ -151,6 +151,9 @@ class InstructionQueue
     /** Sets the global time buffer. */
     void setTimeBuffer(TimeBuffer<TimeStruct> *tb_ptr);
 
+    /** Sets the enableShrewd flag. */
+    void setEnableShrewd(bool enable) { enableShrewd = enable; }
+
     /** Determine if we are drained. */
     bool isDrained() const;
 
@@ -420,6 +423,9 @@ class InstructionQueue
     /** Pointer to list of active threads. */
     std::list<ThreadID> *activeThreads;
 
+    /** Enable SHREWD features */
+    bool enableShrewd;
+
     /** Per Thread IQ count */
     unsigned count[MaxThreads];
 
@@ -435,7 +441,7 @@ class InstructionQueue
     /** The total number of instructions that can be issued in one cycle. */
     unsigned totalWidth;
 
-    /** The number of physical registers in the CPU. */
+    /** The number of physical reprivategisters in the CPU. */
     unsigned numPhysRegs;
 
     /** Number of instructions currently in flight to FUs */
@@ -563,6 +569,33 @@ class InstructionQueue
         statistics::Scalar intAluAccesses;
         statistics::Scalar fpAluAccesses;
         statistics::Scalar vecAluAccesses;
+
+        statistics::Scalar shadowAvailable;
+        statistics::Scalar shadowNotAvailable;
+        statistics::Scalar IntAluShadowAvailable;
+        statistics::Scalar IntAluShadowNotAvailable;
+        statistics::Scalar IntMultShadowAvailable;
+        statistics::Scalar IntMultShadowNotAvailable;
+        statistics::Scalar IntDivShadowAvailable;
+        statistics::Scalar IntDivShadowNotAvailable;
+        statistics::Scalar FloatAddShadowAvailable;
+        statistics::Scalar FloatAddShadowNotAvailable;
+        statistics::Scalar FloatMultShadowAvailable;
+        statistics::Scalar FloatMultShadowNotAvailable;
+        statistics::Scalar FloatDivShadowAvailable;
+        statistics::Scalar FloatDivShadowNotAvailable;
+        statistics::Scalar FloatSqrtShadowAvailable;
+        statistics::Scalar FloatSqrtShadowNotAvailable;
+        statistics::Scalar FloatMultAccShadowAvailable;
+        statistics::Scalar FloatMultAccShadowNotAvailable;
+        statistics::Scalar FloatCvtShadowAvailable;
+        statistics::Scalar FloatCvtShadowNotAvailable;
+        statistics::Scalar FloatCmpShadowAvailable;
+        statistics::Scalar FloatCmpShadowNotAvailable;
+        statistics::Scalar FloatMiscShadowAvailable;
+        statistics::Scalar FloatMiscShadowNotAvailable;
+        statistics::Scalar ShadowIsSameFU;
+        statistics::Scalar ShadowIsNotSameFU;
     } iqIOStats;
 };
 

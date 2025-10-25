@@ -200,7 +200,10 @@ class IEW
     /** Returns if all of the skid buffers are empty. */
     bool skidsEmpty();
 
-    /** Updates overall IEW status based on all of the stages' statuses. */
+    /** Returns a pointer to the instruction queue. */
+    InstructionQueue* getInstQueue() { return &instQueue; }
+
+    /** Updates the overall IEW status based on all of the stages' statuses. */
     void updateStatus();
 
     /** Resets entries of the IQ and the LSQ. */
@@ -228,6 +231,13 @@ class IEW
 
     /** Check misprediction  */
     void checkMisprediction(const DynInstPtr &inst);
+
+    /** Updates issue latency stats when an instruction is issued. */
+    void updateIssueLatencyStats(Cycles latency)
+    {
+        iewStats.totalIssueCycles += latency;
+        iewStats.numIssuedInsts++;
+    }
 
     // hardware transactional memory
     // For debugging purposes, it is useful to keep track of the most recent
@@ -477,6 +487,12 @@ class IEW
         statistics::Formula wbRate;
         /** Average number of woken instructions per writeback. */
         statistics::Formula wbFanout;
+        /** Total issue latency in cycles for all issued instructions. */
+        statistics::Scalar totalIssueCycles;
+        /** Number of instructions issued (for calculating average). */
+        statistics::Scalar numIssuedInsts;
+        /** Average issue latency in cycles. */
+        statistics::Formula avgIssueCycles;
     } iewStats;
 };
 

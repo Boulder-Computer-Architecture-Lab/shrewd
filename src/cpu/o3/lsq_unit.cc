@@ -1176,6 +1176,9 @@ LSQUnit::completeStore(typename StoreQueue::iterator store_idx)
             curTick() - store_inst->fetchTick;
     }
 #endif
+    if (store_inst->fetchCycle != Cycles(-1)) {
+        store_inst->storeCycle = Cycles(cpu->baseStats.numCycles.value()) - store_inst->fetchCycle;
+    }
 
     if (isStalled() &&
         store_inst->seqNum == stallingStoreIsn) {

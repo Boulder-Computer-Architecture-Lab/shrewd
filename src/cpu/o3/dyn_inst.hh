@@ -1009,6 +1009,17 @@ class DynInst : public ExecContext, public RefCounted
     int32_t storeTick = -1;
 #endif
 
+    /** Cycle records for tracking instruction latency in cycles. */
+    Cycles fetchCycle = Cycles(-1);      // instruction fetch is completed
+    Cycles decodeCycle = Cycles(-1);     // instruction enters decode phase
+    Cycles renameCycle = Cycles(-1);     // instruction enters rename phase
+    Cycles dispatchCycle = Cycles(-1);   // instruction dispatched to issue queue
+    Cycles readyCycle = Cycles(-1);      // instruction becomes ready (all operands available)
+    Cycles issueCycle = Cycles(-1);      // instruction issued to execution unit
+    Cycles completeCycle = Cycles(-1);   // instruction completed execution
+    Cycles commitCycle = Cycles(-1);     // instruction committed
+    Cycles storeCycle = Cycles(-1);      // for store instructions
+
     /* Values used by LoadToUse stat */
     Tick firstIssue = -1;
     Tick lastWakeDependents = -1;

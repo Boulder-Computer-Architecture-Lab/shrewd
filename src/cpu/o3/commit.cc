@@ -1260,6 +1260,9 @@ Commit::commitHead(const DynInstPtr &head_inst, unsigned inst_num)
         head_inst->commitTick = curTick() - head_inst->fetchTick;
     }
 #endif
+    if (head_inst->fetchCycle != Cycles(-1)) {
+        head_inst->commitCycle = Cycles(cpu->baseStats.numCycles.value()) - head_inst->fetchCycle;
+    }
 
     // If this was a store, record it for this cycle.
     if (head_inst->isStore() || head_inst->isAtomic())

@@ -295,6 +295,9 @@ class CPU : public BaseCPU
     /** Halts the CPU. */
     void halt() { panic("Halt not implemented!\n"); }
 
+    /** Sets the enableShrewd flag in the instruction queue. */
+    void setEnableShrewd(bool enable) { iew.getInstQueue()->setEnableShrewd(enable); }
+
     /** Register accessors.  Index refers to the physical register index. */
 
     /** Reads a miscellaneous register. */

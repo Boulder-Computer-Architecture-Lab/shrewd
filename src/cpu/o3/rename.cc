@@ -816,6 +816,9 @@ Rename::sortInsts()
             inst->renameTick = curTick() - inst->fetchTick;
         }
 #endif
+        if (inst->fetchCycle != Cycles(-1)) {
+            inst->renameCycle = Cycles(cpu->baseStats.numCycles.value()) - inst->fetchCycle;
+        }
     }
 }
 
