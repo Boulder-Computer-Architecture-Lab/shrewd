@@ -52,6 +52,7 @@
 #include "enums/OpClass.hh"
 #include "params/BaseO3CPU.hh"
 #include "sim/core.hh"
+#include "inst_queue.hh"
 
 // clang complains about std::set being overloaded with Packet::set if
 // we open up the entire namespace std
@@ -95,6 +96,7 @@ InstructionQueue::InstructionQueue(CPU *cpu_ptr, IEW *iew_ptr,
       totalWidth(params.issueWidth),
       commitToIEWDelay(params.commitToIEWDelay),
       enableShrewd(params.enableShrewd),
+      priorityToShadow(params.priorityToShadow),
       iqStats(cpu, totalWidth),
       iqIOStats(cpu)
 {
@@ -830,6 +832,16 @@ InstructionQueue::scheduleReadyInsts()
     ListOrderIt order_it = listOrder.begin();
     ListOrderIt order_end_it = listOrder.end();
 
+    // Structure to track issued instructions for delayed shadow requests
+    struct IssuedInstInfo {
+        DynInstPtr inst;
+        int idx;
+        OpClass op_class;
+        Cycles op_latency;
+        ThreadID tid;
+    };
+    std::vector<IssuedInstInfo> issued_insts;
+
     while (total_issued < totalWidth && order_it != order_end_it) {
         OpClass op_class = (*order_it).queueType;
 
@@ -885,104 +897,10 @@ InstructionQueue::scheduleReadyInsts()
         int idx_shadow = FUPool::NoNeedFU;
         bool has_shadow = false;
         OpClass shadow_op_class = op_class;
-        if(enableShrewd){
+        if(enableShrewd && priorityToShadow){
         // Ask for shadow unit to check the result.
-        if (idx != FUPool::NoFreeFU && idx != FUPool::NoCapableFU) {
-            idx_shadow = fuPool->getUnit(op_class, true, shadow_op_class);
-            
-            if (idx_shadow != FUPool::NoShadowFU && idx != FUPool::NoCapableFU)
-            {
-                if (idx_shadow != FUPool::NoFreeFU) {
-                    has_shadow = true;
-                    iqIOStats.shadowAvailable++;
-
-                    //TODO Change when we have a buffer.
-                    op_latency = std::max(op_latency, fuPool->getOpLatency(shadow_op_class));
-
-                    if (op_class == shadow_op_class)
-                        iqIOStats.ShadowIsSameFU++;
-                    else
-                        iqIOStats.ShadowIsNotSameFU++;
-                }
-                else
-                {
-                    iqIOStats.shadowNotAvailable++;
-                }
-
-                switch (op_class)
-                {
-                    case OpClass::IntAlu:
-                        if (has_shadow)
-                            iqIOStats.IntAluShadowAvailable++;
-                        else
-                            iqIOStats.IntAluShadowNotAvailable++;
-                        break;
-                    case OpClass::IntMult:
-                        if (has_shadow)
-                            iqIOStats.IntMultShadowAvailable++;
-                        else
-                            iqIOStats.IntMultShadowNotAvailable++;
-                        break;
-                    case OpClass::IntDiv:
-                        if (has_shadow)
-                            iqIOStats.IntDivShadowAvailable++;
-                        else
-                            iqIOStats.IntDivShadowNotAvailable++;
-                        break;
-                    case OpClass::FloatAdd:
-                        if (has_shadow)
-                            iqIOStats.FloatAddShadowAvailable++;
-                        else
-                            iqIOStats.FloatAddShadowNotAvailable++;
-                        break;
-                    case OpClass::FloatMult:
-                        if (has_shadow)
-                            iqIOStats.FloatMultShadowAvailable++;
-                        else
-                            iqIOStats.FloatMultShadowNotAvailable++;
-                        break;
-                    case OpClass::FloatDiv:
-                        if (has_shadow)
-                            iqIOStats.FloatDivShadowAvailable++;
-                        else
-                            iqIOStats.FloatDivShadowNotAvailable++;
-                        break;
-                    case OpClass::FloatSqrt:
-                        if (has_shadow)
-                            iqIOStats.FloatSqrtShadowAvailable++;
-                        else
-                            iqIOStats.FloatSqrtShadowNotAvailable++;
-                        break;
-                    case OpClass::FloatMultAcc:
-                        if (has_shadow)
-                            iqIOStats.FloatMultAccShadowAvailable++;
-                        else
-                            iqIOStats.FloatMultAccShadowNotAvailable++;
-                        break;
-                    case OpClass::FloatCvt:
-                        if (has_shadow)
-                            iqIOStats.FloatCvtShadowAvailable++;
-                        else
-                            iqIOStats.FloatCvtShadowNotAvailable++;
-                        break;
-                    case OpClass::FloatCmp:
-                        if (has_shadow)
-                            iqIOStats.FloatCmpShadowAvailable++;
-                        else
-                            iqIOStats.FloatCmpShadowNotAvailable++;
-                        break;
-                    case OpClass::FloatMisc:
-                        if (has_shadow)
-                            iqIOStats.FloatMiscShadowAvailable++;
-                        else
-                            iqIOStats.FloatMiscShadowNotAvailable++;
-                        break;
-                    default:
-                        break;
-                }
-            }
+        requestShadow(idx, idx_shadow, op_class, shadow_op_class, has_shadow, op_latency);
         }
-    }
         // If we have an instruction that doesn't require a FU, or a
         // valid FU, then schedule for execution.
         if (idx > FUPool::NoFreeFU || idx == FUPool::NoNeedFU || idx == FUPool::NoCapableFU) {
@@ -1045,6 +963,17 @@ InstructionQueue::scheduleReadyInsts()
                 }
             }
 
+            // Track issued instructions for delayed shadow processing
+            if (enableShrewd && !priorityToShadow) {
+                IssuedInstInfo info;
+                info.inst = issuing_inst;
+                info.idx = idx;
+                info.op_class = op_class;
+                info.op_latency = op_latency;
+                info.tid = tid;
+                issued_insts.push_back(info);
+            }
+
             DPRINTF(IQ, "Thread %i: Issuing instruction PC %s "
                     "[sn:%llu]\n",
                     tid, issuing_inst->pcState(),
@@ -1097,6 +1026,45 @@ InstructionQueue::scheduleReadyInsts()
         }
     }
 
+    // Process shadow requests for issued instructions when priorityToShadow is false
+    if (enableShrewd && !priorityToShadow) {
+        for (auto &info : issued_insts) {
+            int idx_shadow = FUPool::NoNeedFU;
+            bool has_shadow = false;
+            OpClass shadow_op_class = info.op_class;
+            Cycles shadow_op_latency = info.op_latency;
+            
+            // Request shadow for this issued instruction
+            requestShadow(info.idx, idx_shadow, info.op_class, shadow_op_class, has_shadow, shadow_op_latency);
+            
+            if (has_shadow) {
+                // Schedule the shadow execution
+                if (shadow_op_latency == Cycles(1)) {
+                    // Single-cycle shadow operation - only free if valid FU index
+                    if (idx_shadow >= 0) {
+                        fuPool->freeUnitNextCycle(idx_shadow);
+                    }
+                } else {
+                    // Multi-cycle shadow operation
+                    ++wbOutstanding;
+                    bool shadow_pipelined = fuPool->isPipelined(shadow_op_class);
+                    FUCompletion *execution_shadow = new FUCompletion(NULL, idx_shadow, this);
+                    
+                    cpu->schedule(execution_shadow, cpu->clockEdge(Cycles(shadow_op_latency - 1)));
+                    
+                    if (!shadow_pipelined) {
+                        // If FU isn't pipelined, then it must be freed
+                        // upon the execution completing.
+                        execution_shadow->setFreeFU();
+                    } else {
+                        // Add the FU onto the list of FU's to be freed next cycle.
+                        fuPool->freeUnitNextCycle(idx_shadow);
+                    }
+                }
+            }
+        }
+    }
+
     iqStats.numIssuedDist.sample(total_issued);
     iqStats.instsIssued+= total_issued;
 
@@ -1111,8 +1079,107 @@ InstructionQueue::scheduleReadyInsts()
     }
 }
 
-void
-InstructionQueue::scheduleNonSpec(const InstSeqNum &inst)
+void InstructionQueue::requestShadow(int idx, int &idx_shadow, gem5::enums::OpClass op_class, gem5::enums::OpClass &shadow_op_class, bool &has_shadow, gem5::Cycles &op_latency)
+{
+    if (idx != FUPool::NoFreeFU && idx != FUPool::NoCapableFU)
+    {
+        idx_shadow = fuPool->getUnit(op_class, true, shadow_op_class);
+
+        if (idx_shadow != FUPool::NoShadowFU && idx != FUPool::NoCapableFU)
+        {
+            if (idx_shadow != FUPool::NoFreeFU)
+            {
+                has_shadow = true;
+                iqIOStats.shadowAvailable++;
+
+                // TODO Change when we have a buffer.
+                op_latency = std::max(op_latency, fuPool->getOpLatency(shadow_op_class));
+
+                if (op_class == shadow_op_class)
+                    iqIOStats.ShadowIsSameFU++;
+                else
+                    iqIOStats.ShadowIsNotSameFU++;
+            }
+            else
+            {
+                iqIOStats.shadowNotAvailable++;
+            }
+
+            switch (op_class)
+            {
+            case OpClass::IntAlu:
+                if (has_shadow)
+                    iqIOStats.IntAluShadowAvailable++;
+                else
+                    iqIOStats.IntAluShadowNotAvailable++;
+                break;
+            case OpClass::IntMult:
+                if (has_shadow)
+                    iqIOStats.IntMultShadowAvailable++;
+                else
+                    iqIOStats.IntMultShadowNotAvailable++;
+                break;
+            case OpClass::IntDiv:
+                if (has_shadow)
+                    iqIOStats.IntDivShadowAvailable++;
+                else
+                    iqIOStats.IntDivShadowNotAvailable++;
+                break;
+            case OpClass::FloatAdd:
+                if (has_shadow)
+                    iqIOStats.FloatAddShadowAvailable++;
+                else
+                    iqIOStats.FloatAddShadowNotAvailable++;
+                break;
+            case OpClass::FloatMult:
+                if (has_shadow)
+                    iqIOStats.FloatMultShadowAvailable++;
+                else
+                    iqIOStats.FloatMultShadowNotAvailable++;
+                break;
+            case OpClass::FloatDiv:
+                if (has_shadow)
+                    iqIOStats.FloatDivShadowAvailable++;
+                else
+                    iqIOStats.FloatDivShadowNotAvailable++;
+                break;
+            case OpClass::FloatSqrt:
+                if (has_shadow)
+                    iqIOStats.FloatSqrtShadowAvailable++;
+                else
+                    iqIOStats.FloatSqrtShadowNotAvailable++;
+                break;
+            case OpClass::FloatMultAcc:
+                if (has_shadow)
+                    iqIOStats.FloatMultAccShadowAvailable++;
+                else
+                    iqIOStats.FloatMultAccShadowNotAvailable++;
+                break;
+            case OpClass::FloatCvt:
+                if (has_shadow)
+                    iqIOStats.FloatCvtShadowAvailable++;
+                else
+                    iqIOStats.FloatCvtShadowNotAvailable++;
+                break;
+            case OpClass::FloatCmp:
+                if (has_shadow)
+                    iqIOStats.FloatCmpShadowAvailable++;
+                else
+                    iqIOStats.FloatCmpShadowNotAvailable++;
+                break;
+            case OpClass::FloatMisc:
+                if (has_shadow)
+                    iqIOStats.FloatMiscShadowAvailable++;
+                else
+                    iqIOStats.FloatMiscShadowNotAvailable++;
+                break;
+            default:
+                break;
+            }
+        }
+    }
+}
+void InstructionQueue::scheduleNonSpec(const InstSeqNum &inst)
 {
     DPRINTF(IQ, "Marking nonspeculative instruction [sn:%llu] as ready "
             "to execute.\n", inst);

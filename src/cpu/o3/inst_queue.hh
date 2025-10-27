@@ -154,6 +154,9 @@ class InstructionQueue
     /** Sets the enableShrewd flag. */
     void setEnableShrewd(bool enable) { enableShrewd = enable; }
 
+    /** Sets the priorityToShadow flag. */
+    void setPriorityToShadow(bool enable) { priorityToShadow = enable; }
+
     /** Determine if we are drained. */
     bool isDrained() const;
 
@@ -228,6 +231,8 @@ class InstructionQueue
      * the queue to execute.
      */
     void scheduleReadyInsts();
+
+    void requestShadow(int idx, int &idx_shadow, gem5::enums::OpClass op_class, gem5::enums::OpClass &shadow_op_class, bool &has_shadow, gem5::Cycles &op_latency);
 
     /** Schedules a single specific non-speculative instruction. */
     void scheduleNonSpec(const InstSeqNum &inst);
@@ -425,6 +430,9 @@ class InstructionQueue
 
     /** Enable SHREWD features */
     bool enableShrewd;
+
+    /** Enable priority to shadow functionality */
+    bool priorityToShadow;
 
     /** Per Thread IQ count */
     unsigned count[MaxThreads];

@@ -158,7 +158,7 @@ fast_forward_count =  {
         "508.namd_r" : 10_000_000_000,
         "510.parest_r" : 10_000_000_000,
         "511.povray_r" : 10_000_000_000,
-        "519.lbm_r" : 1_000_000_000,
+        "519.lbm_r" : 10_000_000_000,
         "520.omnetpp_r" : 10_000_000_000,
         "523.xalancbmk_r" : 10_000_000_000,
         "526.blender_r" : 10_000_000_000,
@@ -310,6 +310,12 @@ parser.add_argument(
     help="Enable special instruction queue functionality",
 )
 
+parser.add_argument(
+    "--priorityToShadow",
+    action="store_true",
+    help="Enable priority to shadow functionality",
+)
+
 args = parser.parse_args()
 
 # Associatity is 8
@@ -401,8 +407,8 @@ instruction_counts = [fast_forward_inst, 30_000_000_000]
 def start_accurate_sim():
     print("\t==========\n\tswitched cpus\n\t==========\n\t")
     processor.switch()
-    # Re-set enableShrewd after switching to O3 CPU
-    print(f"DEBUG: Attempting to set enableShrewd = {args.enableShrewd}")
+    # Re-set enableShrewd and priorityToShadow after switching to O3 CPU
+    print(f"DEBUG: Attempting to set enableShrewd = {args.enableShrewd}, priorityToShadow = {args.priorityToShadow}")
     for core in processor.get_cores():
         print(f"DEBUG: Processing core: {core}")
         try:
@@ -415,6 +421,12 @@ def start_accurate_sim():
                 print(f"DEBUG: Successfully set enableShrewd = {args.enableShrewd} after CPU switch")
             else:
                 print(f"DEBUG: cpp_core does not have setEnableShrewd method")
+            if hasattr(cpp_core, 'setPriorityToShadow'):
+                print(f"DEBUG: Found setPriorityToShadow method, calling it...")
+                cpp_core.setPriorityToShadow(args.priorityToShadow)
+                print(f"DEBUG: Successfully set priorityToShadow = {args.priorityToShadow} after CPU switch")
+            else:
+                print(f"DEBUG: cpp_core does not have setPriorityToShadow method")
         except AttributeError as e:
             print(f"DEBUG: AttributeError: {e}")
         except Exception as e:
@@ -441,6 +453,7 @@ simulator = Simulator(
 
 print(f"running {args.benchmark}.rcS")
 print(f"DEBUG: Initial args.enableShrewd value = {args.enableShrewd}")
+print(f"DEBUG: Initial args.priorityToShadow value = {args.priorityToShadow}")
 #simulator.defense(args.defense)
 #simulator.maxIntsProcess(args.maxIntsProcess)
 #simulator.invalidateCounter(args.invalidateCounter)
