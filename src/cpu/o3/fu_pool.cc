@@ -193,85 +193,85 @@ FUPool::getUnit(OpClass capability, bool is_shadow, OpClass &approx_capability)
         {
             case OpClass::IntAlu:
                 fu_idx = findFreeUnit(capability);
-                fu_idx_aux = findFreeUnit(OpClass::FloatAdd);
-                fu_idx_aux_2 = findFreeUnit(OpClass::FloatCmp);
-
-                if (fu_idx == NoFreeFU)
-                {
-                    fu_idx = fu_idx_aux;
-                    approx_capability = OpClass::FloatAdd;
-                    if (fu_idx_aux == NoFreeFU)
-                    {
-                        approx_capability = OpClass::FloatCmp;
-                        fu_idx = fu_idx_aux_2;
-                    }
-                }
+                //fu_idx_aux = findFreeUnit(OpClass::FloatAdd);
+                //fu_idx_aux_2 = findFreeUnit(OpClass::FloatCmp);
+//
+                //if (fu_idx == NoFreeFU)
+                //{
+                //    fu_idx = fu_idx_aux;
+                //    approx_capability = OpClass::FloatAdd;
+                //    if (fu_idx_aux == NoFreeFU)
+                //    {
+                //        approx_capability = OpClass::FloatCmp;
+                //        fu_idx = fu_idx_aux_2;
+                //    }
+                //}
                     
                 break;
             case OpClass::IntMult:
                 fu_idx = findFreeUnit(capability);
-                fu_idx_aux = findFreeUnit(OpClass::FloatMult);
-
-                if (fu_idx == NoFreeFU)
-                {
-                    approx_capability = OpClass::FloatMult;
-                    fu_idx = fu_idx_aux;
-                }
+                //fu_idx_aux = findFreeUnit(OpClass::FloatMult);
+//
+                //if (fu_idx == NoFreeFU)
+                //{
+                //    approx_capability = OpClass::FloatMult;
+                //    fu_idx = fu_idx_aux;
+                //}
 
                 break;
             case OpClass::IntDiv:
                 fu_idx = findFreeUnit(capability);
-                fu_idx_aux = findFreeUnit(OpClass::FloatDiv);
-                
-                if (fu_idx == NoFreeFU)
-                {
-                    approx_capability = OpClass::FloatDiv;
-                    fu_idx = fu_idx_aux;
-                }
+                //fu_idx_aux = findFreeUnit(OpClass::FloatDiv);
+                //
+                //if (fu_idx == NoFreeFU)
+                //{
+                //    approx_capability = OpClass::FloatDiv;
+                //    fu_idx = fu_idx_aux;
+                //}
 
                 break;
             case OpClass::FloatAdd:
                 fu_idx = findFreeUnit(capability);
-                fu_idx_aux = findFreeUnit(OpClass::IntAlu);
-                
-                if (fu_idx == NoFreeFU)
-                {
-                    approx_capability = OpClass::IntAlu;
-                    fu_idx = fu_idx_aux;
-                }
+                //fu_idx_aux = findFreeUnit(OpClass::IntAlu);
+                //
+                //if (fu_idx == NoFreeFU)
+                //{
+                //    approx_capability = OpClass::IntAlu;
+                //    fu_idx = fu_idx_aux;
+                //}
 
                 break;
             case OpClass::FloatMult:
                 fu_idx = findFreeUnit(capability);
-                fu_idx_aux = findFreeUnit(OpClass::IntAlu);
-                
-                if (fu_idx == NoFreeFU)
-                {
-                    approx_capability = OpClass::IntAlu;
-                    fu_idx = fu_idx_aux;
-                }
+                //fu_idx_aux = findFreeUnit(OpClass::IntAlu);
+                //
+                //if (fu_idx == NoFreeFU)
+                //{
+                //    approx_capability = OpClass::IntAlu;
+                //    fu_idx = fu_idx_aux;
+                //}
 
                 break;
             case OpClass::FloatDiv:
                 fu_idx = findFreeUnit(capability);
-                fu_idx_aux = findFreeUnit(OpClass::IntAlu);
-                
-                if (fu_idx == NoFreeFU)
-                {
-                    approx_capability = OpClass::IntAlu;
-                    fu_idx = fu_idx_aux;
-                }
+              //  fu_idx_aux = findFreeUnit(OpClass::IntAlu);
+              //  
+                //if (fu_idx == NoFreeFU)
+               // {
+                //    approx_capability = OpClass::IntAlu;
+                //    fu_idx = fu_idx_aux;
+               // }
 
                 break;
             case OpClass::FloatSqrt:
                 fu_idx = findFreeUnit(capability);
-                fu_idx_aux = findFreeUnit(OpClass::IntAlu);
-                
-                if (fu_idx == NoFreeFU)
-                {
-                    approx_capability = OpClass::IntAlu;
-                    fu_idx = fu_idx_aux;
-                }
+                //fu_idx_aux = findFreeUnit(OpClass::IntAlu);
+                //
+                //if (fu_idx == NoFreeFU)
+                //{
+                //    approx_capability = OpClass::IntAlu;
+                //    fu_idx = fu_idx_aux;
+                //}
                     
                 break;
             case OpClass::FloatMultAcc:
