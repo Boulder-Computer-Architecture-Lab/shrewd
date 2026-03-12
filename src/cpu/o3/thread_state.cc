@@ -42,6 +42,12 @@
 
 #include "cpu/o3/cpu.hh"
 
+// SHREWD: Include RISCV misc registers for MISCREG_PROTECTION access
+#ifdef TARGET_RISCV
+#include "arch/riscv/regs/misc.hh"
+using namespace gem5::RiscvISA;
+#endif
+
 namespace gem5
 {
 
@@ -74,6 +80,13 @@ ThreadState::unserialize(CheckpointIn &cp)
     // the TC.
     gem5::unserialize(*tc, cp);
     noSquashFromTC = false;
+
+    // SHREWD: Initialize the microarchitectural protection flag from the
+    // architectural CSR value after checkpoint restore. This ensures that
+    // context switches correctly restore the protection state.
+#ifdef TARGET_RISCV
+    protectionFlag = (tc->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
+#endif
 }
 
 } // namespace o3

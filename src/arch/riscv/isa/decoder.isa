@@ -1337,10 +1337,10 @@ decode QUADRANT default Unknown::unknown() {
             format SystemOp {
                 0x0: secoff({{
                     xc->setMiscReg(MISCREG_PROTECTION, 0);
-                }}, IsSerializeAfter, IsNonSpeculative, No_OpClass);
+                }}, No_OpClass);
                 0x1: secon({{
                     xc->setMiscReg(MISCREG_PROTECTION, 1);
-                }}, IsSerializeAfter, IsNonSpeculative, No_OpClass);
+                }}, No_OpClass);
             }
         }
 

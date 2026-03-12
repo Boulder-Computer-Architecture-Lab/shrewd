@@ -484,6 +484,27 @@ IEW::squashDueToMemOrder(const DynInstPtr& inst, ThreadID tid)
 {
     DPRINTF(IEW, "[tid:%i] Memory violation, squashing violator and younger "
             "insts, PC: %s [sn:%llu].\n", tid, inst->pcState(), inst->seqNum);
+
+    // SHREWD: Restore protection flag on memory order violation squash.
+    // Use savedProtectionFlag if available (for control instructions),
+    // otherwise the instruction's protection state represents the flag
+    // value when it was renamed.
+    if (inst->isControl()) {
+        cpu->thread[tid]->protectionFlag = inst->savedProtectionFlag;
+    } else {
+        // For non-control instructions, we need to restore the flag
+        // to the state it was in when this instruction was renamed.
+        // The inst->protected_ field indicates the flag was ON when this
+        // instruction was renamed. Since we're squashing from this
+        // instruction, we need to determine what the flag state should be.
+        // The safest approach is to check if there's a secon/secoff
+        // among older committed instructions - but since that info isn't
+        // readily available, we restore based on the instruction's state.
+        // If the instruction was marked protected, the flag was on when
+        // it entered rename.
+        cpu->thread[tid]->protectionFlag = inst->protected_;
+    }
+
     // Need to include inst->seqNum in the following comparison to cover the
     // corner case when a branch misprediction and a memory violation for the
     // same instruction (e.g. load PC) are detected in the same cycle.  In this

@@ -67,6 +67,13 @@
 #include "sim/faults.hh"
 #include "sim/full_system.hh"
 
+// SHREWD: Include RISCV misc registers for MISCREG_PROTECTION access
+// Used to restore protectionFlag from architectural state on trap/TC squashes
+#ifdef TARGET_RISCV
+#include "arch/riscv/regs/misc.hh"
+using namespace gem5::RiscvISA;
+#endif
+
 namespace gem5
 {
 
@@ -519,6 +526,15 @@ Commit::squashFromTrap(ThreadID tid)
 
     DPRINTF(Commit, "Squashing from trap, restarting at PC %s\n", *pc[tid]);
 
+    // SHREWD: Restore protection flag from the architectural CSR state.
+    // On trap squashes, we flush all speculative state and restart from
+    // a trap handler. The CSR reflects the last committed secon/secoff,
+    // so we sync the microarchitectural flag to that value.
+#ifdef TARGET_RISCV
+    thread[tid]->protectionFlag =
+        (thread[tid]->getTC()->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
+#endif
+
     thread[tid]->trapPending = false;
     thread[tid]->noSquashFromTC = false;
     trapInFlight[tid] = false;
@@ -536,6 +552,15 @@ Commit::squashFromTC(ThreadID tid)
 
     DPRINTF(Commit, "Squashing from TC, restarting at PC %s\n", *pc[tid]);
 
+    // SHREWD: Restore protection flag from architectural CSR state.
+    // TC (ThreadContext) squashes occur when external writes to thread
+    // context require flushing speculative state. The CSR contains the
+    // last committed protection state, so we restore from it.
+#ifdef TARGET_RISCV
+    thread[tid]->protectionFlag =
+        (thread[tid]->getTC()->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
+#endif
+
     thread[tid]->noSquashFromTC = false;
     assert(!thread[tid]->trapPending);
 
@@ -552,6 +577,15 @@ Commit::squashFromSquashAfter(ThreadID tid)
             "restarting at PC %s\n", *pc[tid]);
 
     squashAll(tid);
+
+    // SHREWD: Restore protection flag from architectural CSR state.
+    // SquashAfter squashes occur after instructions like fence_i commit.
+    // Restore the flag from the committed CSR value.
+#ifdef TARGET_RISCV
+    thread[tid]->protectionFlag =
+        (thread[tid]->getTC()->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
+#endif
+
     // Make sure to inform the fetch stage of which instruction caused
     // the squash. It'll try to re-fetch an instruction executing in
     // microcode unless this is set.
