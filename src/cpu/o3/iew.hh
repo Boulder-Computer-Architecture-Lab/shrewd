@@ -229,6 +229,14 @@ class IEW
     /** Returns if the LSQ has any stores to writeback. */
     bool hasStoresToWB(ThreadID tid) { return ldstQueue.hasStoresToWB(tid); }
 
+    /** Sets runtime Shrewd enable used by IEW-side fault squash checks. */
+    void
+    setEnableShrewd(bool enable)
+    {
+      enableShrewd = enable;
+      instQueue.setEnableShrewd(enable);
+    }
+
     /** Check misprediction  */
     void checkMisprediction(const DynInstPtr &inst);
 
@@ -259,6 +267,11 @@ class IEW
      * violation.
      */
     void squashDueToMemOrder(const DynInstPtr &inst, ThreadID tid);
+
+    /** Sends commit proper information for a squash due to a Shrewd
+     * fault-injected protected instruction.
+     */
+    void squashDueToShrewdFault(const DynInstPtr &inst, ThreadID tid);
 
     /** Sets Dispatch to blocked, and signals back to other stages to block. */
     void block(ThreadID tid);
@@ -418,6 +431,9 @@ class IEW
     /** Writeback width. */
     unsigned wbWidth;
 
+    /** Runtime SHREWD enable for IEW-side squash checks. */
+    bool enableShrewd;
+
     /** Number of active threads. */
     ThreadID numThreads;
 
@@ -456,6 +472,8 @@ class IEW
         statistics::Scalar lsqFullEvents;
         /** Stat for total number of memory ordering violation events. */
         statistics::Scalar memOrderViolationEvents;
+        /** Stat for total number of squashes due to Shrewd fault injection. */
+        statistics::Scalar shrewdFaultSquashes;
         /** Stat for total number of incorrect predicted taken branches. */
         statistics::Scalar predictedTakenIncorrect;
         /** Stat for total number of incorrect predicted not taken branches. */

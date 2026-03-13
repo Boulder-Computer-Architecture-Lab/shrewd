@@ -87,6 +87,9 @@ ThreadState::unserialize(CheckpointIn &cp)
     protectionFlag = (tc->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
 #endif
     noCommitCountFlag = false;
+    faultInjectActive = false;
+    faultInjectCount = 0;
+    faultInjectTarget = 0;
 }
 
 } // namespace o3

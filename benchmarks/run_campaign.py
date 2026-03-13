@@ -302,6 +302,8 @@ def run_gem5_simulation(run_spec, gem5_binary, gem5_config, results_dir,
     if shrewd_param == "shrewd_default_on":
         cmd.append("--shrewd-default-on")
     elif shrewd_param == "no_shrewd":
+        # SW-duplicate binaries: disable HW Shrewd, enable secon/secoff no-count
+        # mode so region markers don't inflate max_insts accounting.
         cmd.append("--no-shrewd")
     elif shrewd_param != "None":
         print(f"Invalid shrewd_param value: {shrewd_param}")

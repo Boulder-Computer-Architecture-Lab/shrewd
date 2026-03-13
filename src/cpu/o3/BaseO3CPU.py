@@ -229,5 +229,9 @@ class BaseO3CPU(BaseCPU):
         False,
         "Use secon/secoff to toggle instruction no-count region",
     )
+    faultInjectionWindow = Param.Unsigned(
+        0,
+        "Fault injector window size (0 disables). Within each window between secon/secoff, one random instruction is marked fault-injected",
+    )
     shrewdDefaultOn = Param.Bool(False,
         "Start with protection flag ON (100% HW duplication, no secon needed)")

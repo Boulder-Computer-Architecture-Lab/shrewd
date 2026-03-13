@@ -45,6 +45,7 @@
 #include <list>
 #include <utility>
 
+#include "base/random.hh"
 #include "base/statistics.hh"
 #include "cpu/o3/comm.hh"
 #include "cpu/o3/commit.hh"
@@ -442,6 +443,12 @@ class Rename
 
     /** Mode to interpret secon/secoff as no-count region toggles. */
     bool seconNoCountMode;
+
+    /** Fault injector window size (0 disables injection). */
+    unsigned faultInjectionWindow;
+
+    /** RNG for per-window random target selection. */
+    Random::RandomPtr rng;
 
     /** The index of the instruction in the time buffer to IEW that rename is
      * currently using.

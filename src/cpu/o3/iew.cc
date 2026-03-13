@@ -78,6 +78,7 @@ IEW::IEW(CPU *_cpu, const BaseO3CPUParams &params)
       wbNumInst(0),
       wbCycle(0),
       wbWidth(params.wbWidth),
+    enableShrewd(params.enableShrewd),
       numThreads(params.numThreads),
       iewStats(cpu)
 {
@@ -167,6 +168,8 @@ IEW::IEWStats::IEWStats(CPU *cpu)
              "Number of times the LSQ has become full, causing a stall"),
     ADD_STAT(memOrderViolationEvents, statistics::units::Count::get(),
              "Number of memory order violations"),
+    ADD_STAT(shrewdFaultSquashes, statistics::units::Count::get(),
+             "Number of squashes caused by Shrewd fault injection"),
     ADD_STAT(predictedTakenIncorrect, statistics::units::Count::get(),
              "Number of branches that were predicted taken incorrectly"),
     ADD_STAT(predictedNotTakenIncorrect, statistics::units::Count::get(),
@@ -461,6 +464,9 @@ IEW::squashDueToBranch(const DynInstPtr& inst, ThreadID tid)
 
     cpu->thread[tid]->protectionFlag = inst->savedProtectionFlag;
     cpu->thread[tid]->noCommitCountFlag = inst->savedNoCommitCountFlag;
+    cpu->thread[tid]->faultInjectActive = inst->savedFaultInjectActive;
+    cpu->thread[tid]->faultInjectCount = inst->savedFaultInjectCount;
+    cpu->thread[tid]->faultInjectTarget = inst->savedFaultInjectTarget;
 
     if (!toCommit->squash[tid] ||
             inst->seqNum < toCommit->squashedSeqNum[tid]) {
@@ -488,9 +494,15 @@ IEW::squashDueToMemOrder(const DynInstPtr& inst, ThreadID tid)
     if (inst->isControl()) {
         cpu->thread[tid]->protectionFlag = inst->savedProtectionFlag;
         cpu->thread[tid]->noCommitCountFlag = inst->savedNoCommitCountFlag;
+        cpu->thread[tid]->faultInjectActive = inst->savedFaultInjectActive;
+        cpu->thread[tid]->faultInjectCount = inst->savedFaultInjectCount;
+        cpu->thread[tid]->faultInjectTarget = inst->savedFaultInjectTarget;
     } else {
         cpu->thread[tid]->protectionFlag = inst->protected_;
         cpu->thread[tid]->noCommitCountFlag = inst->noCommitCount_;
+        cpu->thread[tid]->faultInjectActive = inst->faultInjectActive_;
+        cpu->thread[tid]->faultInjectCount = inst->faultInjectCount_;
+        cpu->thread[tid]->faultInjectTarget = inst->faultInjectTarget_;
     }
 
     // Need to include inst->seqNum in the following comparison to cover the
@@ -509,6 +521,43 @@ IEW::squashDueToMemOrder(const DynInstPtr& inst, ThreadID tid)
 
         // Must include the memory violator in the squash.
         toCommit->includeSquashInst[tid] = true;
+
+        wroteToTimeBuffer = true;
+    }
+}
+
+void
+IEW::squashDueToShrewdFault(const DynInstPtr& inst, ThreadID tid)
+{
+    DPRINTF(IEW, "[tid:%i] [sn:%llu] Shrewd fault injection on protected "
+            "instruction, squashing younger instructions. PC: %s\n",
+            tid, inst->seqNum, inst->pcState());
+
+    if (inst->isControl()) {
+        cpu->thread[tid]->protectionFlag = inst->savedProtectionFlag;
+        cpu->thread[tid]->noCommitCountFlag = inst->savedNoCommitCountFlag;
+        cpu->thread[tid]->faultInjectActive = inst->savedFaultInjectActive;
+        cpu->thread[tid]->faultInjectCount = inst->savedFaultInjectCount;
+        cpu->thread[tid]->faultInjectTarget = inst->savedFaultInjectTarget;
+    } else {
+        cpu->thread[tid]->protectionFlag = inst->protected_;
+        cpu->thread[tid]->noCommitCountFlag = inst->noCommitCount_;
+        cpu->thread[tid]->faultInjectActive = inst->faultInjectActive_;
+        cpu->thread[tid]->faultInjectCount = inst->faultInjectCount_;
+        cpu->thread[tid]->faultInjectTarget = inst->faultInjectTarget_;
+    }
+
+    if (!toCommit->squash[tid] ||
+            inst->seqNum < toCommit->squashedSeqNum[tid]) {
+        toCommit->squash[tid] = true;
+        toCommit->squashedSeqNum[tid] = inst->seqNum;
+        toCommit->branchTaken[tid] = false;
+
+        set(toCommit->pc[tid], inst->pcState());
+        inst->staticInst->advancePC(*toCommit->pc[tid]);
+
+        toCommit->mispredictInst[tid] = nullptr;
+        toCommit->includeSquashInst[tid] = false;
 
         wroteToTimeBuffer = true;
     }
@@ -1293,6 +1342,17 @@ IEW::executeInsts()
         // scheduler is used.  Currently the scheduler schedules the oldest
         // instruction first, so the branch resolution order will be correct.
         ThreadID tid = inst->threadNumber;
+
+        if (enableShrewd && inst->faultInjected_ && inst->protected_) {
+            if (!fetchRedirect[tid] ||
+                !toCommit->squash[tid] ||
+                toCommit->squashedSeqNum[tid] > inst->seqNum) {
+                fetchRedirect[tid] = true;
+                squashDueToShrewdFault(inst, tid);
+                ++iewStats.shrewdFaultSquashes;
+            }
+            continue;
+        }
 
         if (!fetchRedirect[tid] ||
             !toCommit->squash[tid] ||

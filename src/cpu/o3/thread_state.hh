@@ -97,6 +97,13 @@ class ThreadState : public gem5::ThreadState
     // Microarchitectural no-count flag used for speculation
     bool noCommitCountFlag = false;
 
+    // Fault injector speculative state (windowed random injection).
+    // faultInjectActive gates whether current instructions are eligible
+    // for counting/injection (set by secon/secoff region markers).
+    bool faultInjectActive = false;
+    uint64_t faultInjectCount = 0;
+    uint64_t faultInjectTarget = 0;
+
     ThreadState(CPU *_cpu, int _thread_num, Process *_process);
 
     void serialize(CheckpointOut &cp) const override;

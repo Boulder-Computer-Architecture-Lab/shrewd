@@ -64,7 +64,9 @@ Rename::Rename(CPU *_cpu, const BaseO3CPUParams &params)
       decodeToRenameDelay(params.decodeToRenameDelay),
       commitToRenameDelay(params.commitToRenameDelay),
       renameWidth(params.renameWidth),
-    seconNoCountMode(params.seconNoCountMode),
+            seconNoCountMode(params.seconNoCountMode),
+            faultInjectionWindow(params.faultInjectionWindow),
+            rng(Random::genRandom()),
       numThreads(params.numThreads),
       stats(_cpu)
 {
@@ -734,6 +736,37 @@ Rename::renameInsts(ThreadID tid)
         const bool is_secon = (inst_name == "secon");
         const bool is_secoff = (inst_name == "secoff");
         const bool is_sec_ctrl = is_secon || is_secoff;
+        const bool is_fp_inst = inst->isFloating();
+
+        if (faultInjectionWindow > 0) {
+            if (is_secon) {
+                // secon marks region where counting/injection is eligible.
+                // Window state persists across region boundaries.
+                cpu->thread[tid]->faultInjectActive = true;
+            } else if (is_secoff) {
+                // secoff disables counting/injection eligibility only.
+                // Keep count/target so window continues when re-enabled.
+                cpu->thread[tid]->faultInjectActive = false;
+            } else if (cpu->thread[tid]->faultInjectActive && is_fp_inst) {
+                if (cpu->thread[tid]->faultInjectTarget == 0) {
+                    cpu->thread[tid]->faultInjectTarget =
+                        rng->random<uint64_t>(1, faultInjectionWindow);
+                }
+
+                cpu->thread[tid]->faultInjectCount++;
+
+                if (cpu->thread[tid]->faultInjectCount ==
+                    cpu->thread[tid]->faultInjectTarget) {
+                    inst->faultInjected_ = true;
+                }
+
+                if (cpu->thread[tid]->faultInjectCount >= faultInjectionWindow) {
+                    cpu->thread[tid]->faultInjectCount = 0;
+                    cpu->thread[tid]->faultInjectTarget =
+                        rng->random<uint64_t>(1, faultInjectionWindow);
+                }
+            }
+        }
 
         if (seconNoCountMode && is_sec_ctrl) {
             // In no-count mode, secon/secoff are region markers for commit
@@ -761,10 +794,16 @@ Rename::renameInsts(ThreadID tid)
         }
 
         inst->protected_ = cpu->thread[tid]->protectionFlag;
+        inst->faultInjectActive_ = cpu->thread[tid]->faultInjectActive;
+        inst->faultInjectCount_ = cpu->thread[tid]->faultInjectCount;
+        inst->faultInjectTarget_ = cpu->thread[tid]->faultInjectTarget;
 
         if (inst->isControl()) {
             inst->savedProtectionFlag = cpu->thread[tid]->protectionFlag;
             inst->savedNoCommitCountFlag = cpu->thread[tid]->noCommitCountFlag;
+            inst->savedFaultInjectActive = cpu->thread[tid]->faultInjectActive;
+            inst->savedFaultInjectCount = cpu->thread[tid]->faultInjectCount;
+            inst->savedFaultInjectTarget = cpu->thread[tid]->faultInjectTarget;
         }
 
         // Put instruction in rename queue.

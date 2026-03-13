@@ -44,9 +44,11 @@
 
 #include <algorithm>
 #include <array>
+#include <cstring>
 #include <deque>
 #include <list>
 #include <string>
+#include <vector>
 
 #include "base/refcnt.hh"
 #include "base/trace.hh"
@@ -336,6 +338,19 @@ class DynInst : public ExecContext, public RefCounted
 
     // Previous no-commit-count flag to revert upon misprediction (Only for branches)
     bool savedNoCommitCountFlag = false;
+
+    // Fault injection tag for this dynamic instruction
+    bool faultInjected_ = false;
+
+    // Snapshot of injector state at this instruction
+    bool faultInjectActive_ = false;
+    uint64_t faultInjectCount_ = 0;
+    uint64_t faultInjectTarget_ = 0;
+
+    // Snapshot used for branch-based recovery
+    bool savedFaultInjectActive = false;
+    uint64_t savedFaultInjectCount = 0;
+    uint64_t savedFaultInjectTarget = 0;
 
     /** The Macroop if one exists */
     const StaticInstPtr macroop;
@@ -1179,6 +1194,12 @@ class DynInst : public ExecContext, public RefCounted
         const PhysRegIdPtr reg = renamedDestIdx(idx);
         if (reg->is(InvalidRegClass))
             return;
+
+        if (faultInjected_) {
+            constexpr unsigned msb = sizeof(RegVal) * 8 - 1;
+            val ^= (RegVal(1) << msb);
+        }
+
         cpu->setReg(reg, val, threadNumber);
         setResult(reg->regClass(), val);
     }
@@ -1189,8 +1210,22 @@ class DynInst : public ExecContext, public RefCounted
         const PhysRegIdPtr reg = renamedDestIdx(idx);
         if (reg->is(InvalidRegClass))
             return;
-        cpu->setReg(reg, val, threadNumber);
-        setResult(reg->regClass(), val);
+
+        if (!faultInjected_) {
+            cpu->setReg(reg, val, threadNumber);
+            setResult(reg->regClass(), val);
+            return;
+        }
+
+        const size_t size = reg->regClass().regBytes();
+        std::vector<uint8_t> flipped(size);
+        std::memcpy(flipped.data(), val, size);
+        if (size > 0) {
+            flipped[size - 1] ^= 0x80;
+        }
+
+        cpu->setReg(reg, flipped.data(), threadNumber);
+        setResult(reg->regClass(), flipped.data());
     }
 };
 

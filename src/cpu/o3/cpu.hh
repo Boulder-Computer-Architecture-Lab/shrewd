@@ -296,7 +296,7 @@ class CPU : public BaseCPU
     void halt() { panic("Halt not implemented!\n"); }
 
     /** Sets the enableShrewd flag in the instruction queue. */
-    void setEnableShrewd(bool enable) { iew.getInstQueue()->setEnableShrewd(enable); }
+    void setEnableShrewd(bool enable) { iew.setEnableShrewd(enable); }
 
     /** Sets the priorityToShadow flag in the instruction queue. */
     void setPriorityToShadow(bool enable) { iew.getInstQueue()->setPriorityToShadow(enable); }
