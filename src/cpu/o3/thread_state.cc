@@ -39,7 +39,6 @@
  */
 
 #include "cpu/o3/thread_state.hh"
-
 #include "cpu/o3/cpu.hh"
 
 // SHREWD: Include RISCV misc registers for MISCREG_PROTECTION access
@@ -87,6 +86,7 @@ ThreadState::unserialize(CheckpointIn &cp)
 #ifdef TARGET_RISCV
     protectionFlag = (tc->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
 #endif
+    noCommitCountFlag = false;
 }
 
 } // namespace o3

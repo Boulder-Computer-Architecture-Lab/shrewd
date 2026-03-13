@@ -328,8 +328,14 @@ class DynInst : public ExecContext, public RefCounted
     // Protected Tag
     bool protected_ = false;
 
+    // Marks instructions that should not contribute to commit instruction count
+    bool noCommitCount_ = false;
+
     // Previous protection flag to revert upon misprediction (Only for branches)
     bool savedProtectionFlag = false;
+
+    // Previous no-commit-count flag to revert upon misprediction (Only for branches)
+    bool savedNoCommitCountFlag = false;
 
     /** The Macroop if one exists */
     const StaticInstPtr macroop;

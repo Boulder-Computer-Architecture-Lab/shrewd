@@ -94,6 +94,9 @@ class ThreadState : public gem5::ThreadState
     // Microarchitectural protection flag used for speculation
     bool protectionFlag = false;
 
+    // Microarchitectural no-count flag used for speculation
+    bool noCommitCountFlag = false;
+
     ThreadState(CPU *_cpu, int _thread_num, Process *_process);
 
     void serialize(CheckpointOut &cp) const override;

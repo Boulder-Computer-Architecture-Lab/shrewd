@@ -40,11 +40,9 @@
  */
 
 #include "cpu/o3/commit.hh"
-
 #include <algorithm>
 #include <set>
 #include <string>
-
 #include "base/compiler.hh"
 #include "base/loader/symtab.hh"
 #include "base/logging.hh"
@@ -1364,7 +1362,7 @@ Commit::updateComInstStats(const DynInstPtr &inst)
 {
     ThreadID tid = inst->threadNumber;
 
-    if (!inst->isMicroop() || inst->isLastMicroop()) {
+    if ((!inst->isMicroop() || inst->isLastMicroop()) && !inst->noCommitCount_) {
         cpu->commitStats[tid]->numInsts++;
         cpu->baseStats.numInsts++;
     }
@@ -1372,7 +1370,7 @@ Commit::updateComInstStats(const DynInstPtr &inst)
 
     // To match the old model, don't count nops and instruction
     // prefetches towards the total commit count.
-    if (!inst->isNop() && !inst->isInstPrefetch()) {
+    if (!inst->isNop() && !inst->isInstPrefetch() && !inst->noCommitCount_) {
         cpu->instDone(tid, inst);
     }
 

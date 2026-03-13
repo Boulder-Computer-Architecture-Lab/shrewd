@@ -225,3 +225,7 @@ class BaseO3CPU(BaseCPU):
 
     enableShrewd = Param.Bool(False, "Enable SHREWD features")
     priorityToShadow = Param.Bool(False, "Enable priority to shadow functionality")
+    seconNoCountMode = Param.Bool(
+        False,
+        "Use secon/secoff to toggle instruction no-count region",
+    )

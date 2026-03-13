@@ -1332,7 +1332,7 @@ decode QUADRANT default Unknown::unknown() {
                 }}, inst_flags=SimdIndexedLoadOp);
             }
         }
-        
+
         0x02: decode FUNCT3 {
             format SystemOp {
                 0x0: secoff({{

@@ -440,6 +440,9 @@ class Rename
     /** Rename width, in instructions. */
     unsigned renameWidth;
 
+    /** Mode to interpret secon/secoff as no-count region toggles. */
+    bool seconNoCountMode;
+
     /** The index of the instruction in the time buffer to IEW that rename is
      * currently using.
      */

@@ -64,6 +64,7 @@ Rename::Rename(CPU *_cpu, const BaseO3CPUParams &params)
       decodeToRenameDelay(params.decodeToRenameDelay),
       commitToRenameDelay(params.commitToRenameDelay),
       renameWidth(params.renameWidth),
+    seconNoCountMode(params.seconNoCountMode),
       numThreads(params.numThreads),
       stats(_cpu)
 {
@@ -729,11 +730,18 @@ Rename::renameInsts(ThreadID tid)
 
         renameDestRegs(inst, inst->threadNumber);
 
-        // Check for protection insts to update flag immediately
         const std::string &inst_name = inst->staticInst->getName();
-        if (inst_name == "secon") {
+        const bool is_secon = (inst_name == "secon");
+        const bool is_secoff = (inst_name == "secoff");
+        const bool is_sec_ctrl = is_secon || is_secoff;
+
+        if (seconNoCountMode && is_sec_ctrl) {
+            // In no-count mode, secon/secoff are region markers for commit
+            // accounting (not protection markers).
+            cpu->thread[tid]->noCommitCountFlag = is_secon;
+        } else if (is_secon) {
             cpu->thread[tid]->protectionFlag = true;
-        } else if (inst_name == "secoff") {
+        } else if (is_secoff) {
             cpu->thread[tid]->protectionFlag = false;
         }
 
@@ -748,12 +756,15 @@ Rename::renameInsts(ThreadID tid)
         // this instruction have been renamed.
         ppRename->notify(inst);
 
-        // Capture the protection flag value for this instruction as it enters ROB
+        if (is_sec_ctrl || cpu->thread[tid]->noCommitCountFlag) {
+            inst->noCommitCount_ = true;
+        }
+
         inst->protected_ = cpu->thread[tid]->protectionFlag;
-        
-        // For branch/speculation-creating instructions, also save the flag for recovery
+
         if (inst->isControl()) {
             inst->savedProtectionFlag = cpu->thread[tid]->protectionFlag;
+            inst->savedNoCommitCountFlag = cpu->thread[tid]->noCommitCountFlag;
         }
 
         // Put instruction in rename queue.
