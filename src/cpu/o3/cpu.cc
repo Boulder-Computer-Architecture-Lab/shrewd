@@ -312,6 +312,17 @@ CPU::CPU(const BaseO3CPUParams &params)
         threadContexts.push_back(tc);
     }
 
+    // If shrewdDefaultOn, start with protection flag ON so that Shrewd
+    // duplicates all instructions without needing a secon in the binary.
+    if (params.shrewdDefaultOn) {
+        for (ThreadID tid = 0; tid < numThreads; ++tid) {
+            thread[tid]->protectionFlag = true;
+
+            // Hardcoded to MISCREG_PROTECTION
+            isa[tid]->setMiscRegNoEffect(193, 1);
+        }
+    }
+
     // O3CPU always requires an interrupt controller.
     if (!params.switched_out && interrupts.empty()) {
         fatal("O3CPU %s has no interrupt controller.\n"

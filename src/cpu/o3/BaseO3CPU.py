@@ -229,3 +229,5 @@ class BaseO3CPU(BaseCPU):
         False,
         "Use secon/secoff to toggle instruction no-count region",
     )
+    shrewdDefaultOn = Param.Bool(False,
+        "Start with protection flag ON (100% HW duplication, no secon needed)")

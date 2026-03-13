@@ -293,7 +293,7 @@ enum MiscRegIndex
     MISCREG_JVT,
 
     // Protection Status Register
-    MISCREG_PROTECTION,
+    MISCREG_PROTECTION = 193,
 
     NUM_PHYS_MISCREGS,
     MISCREG_FFLAGS_EXE = NUM_PHYS_MISCREGS,
