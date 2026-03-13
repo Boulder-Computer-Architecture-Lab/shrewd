@@ -1,0 +1,3 @@
+[submodule "simpoint"]
+	path = simpoint
+	url = git@github.com:Boulder-Computer-Architecture-Lab/SimPoint.git
