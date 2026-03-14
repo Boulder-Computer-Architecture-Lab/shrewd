@@ -65,6 +65,7 @@ Rename::Rename(CPU *_cpu, const BaseO3CPUParams &params)
       commitToRenameDelay(params.commitToRenameDelay),
       renameWidth(params.renameWidth),
             seconNoCountMode(params.seconNoCountMode),
+        shrewdDefaultOn(params.shrewdDefaultOn),
             faultInjectionWindow(params.faultInjectionWindow),
             rng(Random::genRandom()),
       numThreads(params.numThreads),
@@ -738,6 +739,12 @@ Rename::renameInsts(ThreadID tid)
         const bool is_sec_ctrl = is_secon || is_secoff;
         const bool is_fp_inst = inst->isFloating();
 
+        // Snapshot pre-instruction protection state for squash recovery.
+        inst->savedProtectionFlag = cpu->thread[tid]->protectionFlag;
+
+        // Snapshot pre-instruction no-count state for squash recovery.
+        inst->savedNoCommitCountFlag = cpu->thread[tid]->noCommitCountFlag;
+
         if (faultInjectionWindow > 0) {
             if (is_secon) {
                 // secon marks region where counting/injection is eligible.
@@ -772,10 +779,14 @@ Rename::renameInsts(ThreadID tid)
             // In no-count mode, secon/secoff are region markers for commit
             // accounting (not protection markers).
             cpu->thread[tid]->noCommitCountFlag = is_secon;
-        } else if (is_secon) {
+        } else if (!shrewdDefaultOn && is_secon) {
             cpu->thread[tid]->protectionFlag = true;
-        } else if (is_secoff) {
+        } else if (!shrewdDefaultOn && is_secoff) {
             cpu->thread[tid]->protectionFlag = false;
+        }
+
+        if (shrewdDefaultOn) {
+            cpu->thread[tid]->protectionFlag = true;
         }
 
         if (inst->isAtomic() || inst->isStore()) {
@@ -799,8 +810,6 @@ Rename::renameInsts(ThreadID tid)
         inst->faultInjectTarget_ = cpu->thread[tid]->faultInjectTarget;
 
         if (inst->isControl()) {
-            inst->savedProtectionFlag = cpu->thread[tid]->protectionFlag;
-            inst->savedNoCommitCountFlag = cpu->thread[tid]->noCommitCountFlag;
             inst->savedFaultInjectActive = cpu->thread[tid]->faultInjectActive;
             inst->savedFaultInjectCount = cpu->thread[tid]->faultInjectCount;
             inst->savedFaultInjectTarget = cpu->thread[tid]->faultInjectTarget;

@@ -499,7 +499,7 @@ IEW::squashDueToMemOrder(const DynInstPtr& inst, ThreadID tid)
         cpu->thread[tid]->faultInjectTarget = inst->savedFaultInjectTarget;
     } else {
         cpu->thread[tid]->protectionFlag = inst->protected_;
-        cpu->thread[tid]->noCommitCountFlag = inst->noCommitCount_;
+        cpu->thread[tid]->noCommitCountFlag = inst->savedNoCommitCountFlag;
         cpu->thread[tid]->faultInjectActive = inst->faultInjectActive_;
         cpu->thread[tid]->faultInjectCount = inst->faultInjectCount_;
         cpu->thread[tid]->faultInjectTarget = inst->faultInjectTarget_;
@@ -541,7 +541,7 @@ IEW::squashDueToShrewdFault(const DynInstPtr& inst, ThreadID tid)
         cpu->thread[tid]->faultInjectTarget = inst->savedFaultInjectTarget;
     } else {
         cpu->thread[tid]->protectionFlag = inst->protected_;
-        cpu->thread[tid]->noCommitCountFlag = inst->noCommitCount_;
+        cpu->thread[tid]->noCommitCountFlag = inst->savedNoCommitCountFlag;
         cpu->thread[tid]->faultInjectActive = inst->faultInjectActive_;
         cpu->thread[tid]->faultInjectCount = inst->faultInjectCount_;
         cpu->thread[tid]->faultInjectTarget = inst->faultInjectTarget_;

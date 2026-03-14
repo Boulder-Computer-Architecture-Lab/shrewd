@@ -305,6 +305,7 @@ def run_gem5_simulation(run_spec, gem5_binary, gem5_config, results_dir,
         # SW-duplicate binaries: disable HW Shrewd, enable secon/secoff no-count
         # mode so region markers don't inflate max_insts accounting.
         cmd.append("--no-shrewd")
+        cmd.append("--secon-no-count")
     elif shrewd_param != "None":
         print(f"Invalid shrewd_param value: {shrewd_param}")
         sys.exit(1) # Exits with a status code of 1 (indicating an error)

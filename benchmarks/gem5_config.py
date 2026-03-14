@@ -53,6 +53,8 @@ parser.add_argument("--no-shrewd", action="store_true",
                     help="Disable Shrewd on the O3 core (for software-only protection)")
 parser.add_argument("--shrewd-default-on", action="store_true",
                     help="Start with protection ON (100%% HW duplication, no secon needed)")
+parser.add_argument("--secon-no-count", action="store_true",
+                    help="Enable seconNoCountMode: secon/secoff toggle a no-count region")
 args, benchmark_args = parser.parse_known_args()
 
 if benchmark_args and benchmark_args[0] == "--benchmark-args":
@@ -113,7 +115,7 @@ if args.no_shrewd:
         core.core.shrewdDefaultOn = False
 else:
     for core in processor._switchable_cores["switch"]:
-        core.core.seconNoCountMode = False
+        core.core.seconNoCountMode = bool(args.secon_no_count)
         core.core.enableShrewd = True
         core.core.priorityToShadow = True
         if args.shrewd_default_on:

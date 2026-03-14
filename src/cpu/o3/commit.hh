@@ -345,6 +345,9 @@ class Commit
     /** Pointer to O3CPU. */
     CPU *cpu;
 
+    /** If true, keep protection enabled for all instructions. */
+    bool shrewdDefaultOn;
+
     /** Vector of all of the threads. */
     std::vector<ThreadState *> thread;
 

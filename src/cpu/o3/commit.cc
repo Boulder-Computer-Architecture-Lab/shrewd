@@ -89,6 +89,7 @@ Commit::processTrapEvent(ThreadID tid)
 Commit::Commit(CPU *_cpu, const BaseO3CPUParams &params)
     : commitPolicy(params.smtCommitPolicy),
       cpu(_cpu),
+    shrewdDefaultOn(params.shrewdDefaultOn),
       iewToCommitDelay(params.iewToCommitDelay),
       commitToIEWDelay(params.commitToIEWDelay),
       renameToROBDelay(params.renameToROBDelay),
@@ -528,10 +529,16 @@ Commit::squashFromTrap(ThreadID tid)
     // On trap squashes, we flush all speculative state and restart from
     // a trap handler. The CSR reflects the last committed secon/secoff,
     // so we sync the microarchitectural flag to that value.
+    if (shrewdDefaultOn) {
+        thread[tid]->protectionFlag = true;
+    }
 #ifdef TARGET_RISCV
-    thread[tid]->protectionFlag =
-        (thread[tid]->getTC()->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
+    else {
+        thread[tid]->protectionFlag =
+            (thread[tid]->getTC()->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
+    }
 #endif
+    thread[tid]->noCommitCountFlag = false;
 
     thread[tid]->trapPending = false;
     thread[tid]->noSquashFromTC = false;
@@ -554,10 +561,16 @@ Commit::squashFromTC(ThreadID tid)
     // TC (ThreadContext) squashes occur when external writes to thread
     // context require flushing speculative state. The CSR contains the
     // last committed protection state, so we restore from it.
+    if (shrewdDefaultOn) {
+        thread[tid]->protectionFlag = true;
+    }
 #ifdef TARGET_RISCV
-    thread[tid]->protectionFlag =
-        (thread[tid]->getTC()->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
+    else {
+        thread[tid]->protectionFlag =
+            (thread[tid]->getTC()->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
+    }
 #endif
+    thread[tid]->noCommitCountFlag = false;
 
     thread[tid]->noSquashFromTC = false;
     assert(!thread[tid]->trapPending);
@@ -579,10 +592,16 @@ Commit::squashFromSquashAfter(ThreadID tid)
     // SHREWD: Restore protection flag from architectural CSR state.
     // SquashAfter squashes occur after instructions like fence_i commit.
     // Restore the flag from the committed CSR value.
+    if (shrewdDefaultOn) {
+        thread[tid]->protectionFlag = true;
+    }
 #ifdef TARGET_RISCV
-    thread[tid]->protectionFlag =
-        (thread[tid]->getTC()->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
+    else {
+        thread[tid]->protectionFlag =
+            (thread[tid]->getTC()->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
+    }
 #endif
+    thread[tid]->noCommitCountFlag = false;
 
     // Make sure to inform the fetch stage of which instruction caused
     // the squash. It'll try to re-fetch an instruction executing in

@@ -444,6 +444,9 @@ class Rename
     /** Mode to interpret secon/secoff as no-count region toggles. */
     bool seconNoCountMode;
 
+    /** If true, keep protection enabled for all instructions. */
+    bool shrewdDefaultOn;
+
     /** Fault injector window size (0 disables injection). */
     unsigned faultInjectionWindow;
 

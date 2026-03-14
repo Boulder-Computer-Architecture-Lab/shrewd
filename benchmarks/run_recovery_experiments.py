@@ -70,6 +70,7 @@ def run_one(gem5_binary: Path, gem5_config: Path, binary: Path, variant: str,
         pass
     elif variant == "sw":
         cmd.append("--no-shrewd")
+        cmd.append("--secon-no-count")
     else:
         raise ValueError(f"Unknown variant: {variant}")
 
