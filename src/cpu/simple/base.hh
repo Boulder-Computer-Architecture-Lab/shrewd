@@ -94,6 +94,8 @@ class BaseSimpleCPU : public BaseCPU
     virtual ~BaseSimpleCPU();
     void wakeup(ThreadID tid) override;
   public:
+    bool m_ignoringCount;
+    bool m_seconNoCountMode;
     trace::InstRecord *traceData;
     CheckerCPU *checker;
 

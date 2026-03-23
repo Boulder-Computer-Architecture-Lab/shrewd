@@ -38,3 +38,9 @@ class BaseSimpleCPU(BaseCPU):
     cxx_class = "gem5::BaseSimpleCPU"
 
     branchPred = Param.BranchPredictor(NULL, "Branch Predictor")
+    seconNoCountMode = Param.Bool(
+        False,
+        "When true, secon/secoff toggle a no-count region (skip secon, "
+        "secoff, and everything between). When false, only the secon/secoff "
+        "instructions themselves are skipped.",
+    )

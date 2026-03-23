@@ -117,6 +117,9 @@ BaseSimpleCPU::BaseSimpleCPU(const BaseSimpleCPUParams &p)
     } else {
         checker = NULL;
     }
+
+    m_ignoringCount = false;
+    m_seconNoCountMode = p.seconNoCountMode;
 }
 
 void
@@ -152,6 +155,25 @@ BaseSimpleCPU::countInst()
 {
     SimpleExecContext& t_info = *threadInfo[curThread];
 
+    // Handle secon/secoff region markers.
+    // seconNoCountMode == true  → skip secon, secoff, AND everything between
+    // seconNoCountMode == false → skip only the secon/secoff instructions
+    std::string mn = curStaticInst->getName();
+    if (mn == "secon")
+    {
+        if (m_seconNoCountMode)
+            m_ignoringCount = true;
+        return;
+    }
+    else if (mn == "secoff")
+    {
+        if (m_seconNoCountMode)
+            m_ignoringCount = false;
+        return;
+    }
+    else if (m_ignoringCount)
+        return;
+
     if (!curStaticInst->isMicroop() || curStaticInst->isLastMicroop()) {
         t_info.numInst++;
     }
@@ -162,6 +184,22 @@ void
 BaseSimpleCPU::countFetchInst()
 {
     SimpleExecContext& t_info = *threadInfo[curThread];
+
+    std::string mn = curStaticInst->getName();
+    if (mn == "secon")
+    {
+        if (m_seconNoCountMode)
+            m_ignoringCount = true;
+        return;
+    }
+    else if (mn == "secoff")
+    {
+        if (m_seconNoCountMode)
+            m_ignoringCount = false;
+        return;
+    }
+    else if (m_ignoringCount)
+        return;
 
     if (!curStaticInst->isMicroop() || curStaticInst->isLastMicroop()) {
         // increment thread level numInsts fetched count
@@ -175,6 +213,22 @@ void
 BaseSimpleCPU::countCommitInst()
 {
     SimpleExecContext& t_info = *threadInfo[curThread];
+    
+    std::string mn = curStaticInst->getName();
+    if (mn == "secon")
+    {
+        if (m_seconNoCountMode)
+            m_ignoringCount = true;
+        return;
+    }
+    else if (mn == "secoff")
+    {
+        if (m_seconNoCountMode)
+            m_ignoringCount = false;
+        return;
+    }
+    else if (m_ignoringCount)
+        return;
 
     if (!curStaticInst->isMicroop() || curStaticInst->isLastMicroop()) {
         // increment thread level and core level numInsts count
