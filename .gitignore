@@ -48,4 +48,6 @@ benchmarks/baseline/
 benchmarks/protected_binaries/
 benchmarks/results/
 benchmarks/results_duplicate/
+benchmarks/results_recovery
 benchmarks/top3_summary.txt
+benchmarks/*.png

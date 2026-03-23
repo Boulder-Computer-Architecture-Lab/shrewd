@@ -106,6 +106,9 @@ board.set_se_binary_workload(
 
 # ---------------------------------------------------------------------------
 # Enable Shrewd on the O3 (switch) cores unless --no-shrewd is set.
+# Configure seconNoCountMode on the ATOMIC (start) cores so that
+# instruction counting during fast-forward matches the O3 core's mode,
+# ensuring all variants reach the same SimPoint tick.
 # ---------------------------------------------------------------------------
 if args.no_shrewd:
     for core in processor._switchable_cores["switch"]:
@@ -113,6 +116,8 @@ if args.no_shrewd:
         core.core.enableShrewd = False
         core.core.priorityToShadow = False
         core.core.shrewdDefaultOn = False
+    for core in processor._switchable_cores["start"]:
+        core.core.seconNoCountMode = True
 else:
     for core in processor._switchable_cores["switch"]:
         core.core.seconNoCountMode = bool(args.secon_no_count)
@@ -120,6 +125,8 @@ else:
         core.core.priorityToShadow = True
         if args.shrewd_default_on:
             core.core.shrewdDefaultOn = True
+    for core in processor._switchable_cores["start"]:
+        core.core.seconNoCountMode = bool(args.secon_no_count)
 
 # ---------------------------------------------------------------------------
 # Exit-event handler: manages fast-forward → switch → detailed simulation

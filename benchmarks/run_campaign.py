@@ -31,13 +31,13 @@ BASELINE_DIR = SCRIPT_DIR / "baseline"
 PROTECTED_DIR = SCRIPT_DIR / "protected_binaries"
 RESULTS_DIR = SCRIPT_DIR / "results"
 RESULTS_DUPLICATE_DIR = SCRIPT_DIR / "results_duplicate"
-SIMPOINT_SUMMARY = PROJECT_ROOT / "simpoint" / "results" / "top3_summary.txt"
+SIMPOINT_SUMMARY = SCRIPT_DIR / "top3_summary.txt"
 
 PROTECTION_LEVELS = ["5pct", "10pct", "20pct", "50pct", "100pct"]
 DUPLICATE_LEVELS = ["dup_5pct", "dup_10pct", "dup_20pct", "dup_50pct"]
 
 # Benchmarks that have protected/duplicate binaries under protected_binaries/
-PROTECTED_BENCHMARKS = ["bwaves", "lbm", "nab", "namd", "povray", "roms"]
+PROTECTED_BENCHMARKS = ["bwaves", "cactuBSSN", "cam4", "lbm", "nab", "namd", "parest", "roms"]
 
 # ── Benchmark configs (mirrors run_campaign.py) ──────────────────────────
 BENCHMARK_CONFIG = {
@@ -66,59 +66,59 @@ BENCHMARK_CONFIG = {
         "args": ["ref.prm"],
         "stdin": None,
     },
-    "povray": {
-        "spec_num": "511.povray_r",
-        "binary": "povray_r_base.riscv",
-        "args": ["SPEC-benchmark-ref.ini"],
-        "stdin": None,
-    },
+    # "povray": {
+    #     "spec_num": "511.povray_r",
+    #     "binary": "povray_r_base.riscv",
+    #     "args": ["SPEC-benchmark-ref.ini"],
+    #     "stdin": None,
+    # },
     "lbm": {
         "spec_num": "519.lbm_r",
         "binary": "lbm_r_base.riscv",
         "args": ["3000", "reference.dat", "0", "0", "100_100_130_ldc.of"],
         "stdin": None,
     },
-    "wrf": {
-        "spec_num": "521.wrf_r",
-        "binary": "wrf_r_base.riscv",
-        "args": [],
-        "stdin": None,
-    },
-    "blender": {
-        "spec_num": "526.blender_r",
-        "binary": "blender_r_base.riscv",
-        "args": ["sh3_no_char.blend", "--render-output", "sh3_no_char_",
-                 "--threads", "1", "-b", "-F", "RAWTGA", "-s", "849",
-                 "-e", "849", "-a"],
-        "stdin": None,
-    },
+    # "wrf": {
+    #     "spec_num": "521.wrf_r",
+    #     "binary": "wrf_r_base.riscv",
+    #     "args": [],
+    #     "stdin": None,
+    # },
+    # "blender": {
+    #     "spec_num": "526.blender_r",
+    #     "binary": "blender_r_base.riscv",
+    #     "args": ["sh3_no_char.blend", "--render-output", "sh3_no_char_",
+    #              "--threads", "1", "-b", "-F", "RAWTGA", "-s", "849",
+    #              "-e", "849", "-a"],
+    #     "stdin": None,
+    # },
     "cam4": {
         "spec_num": "527.cam4_r",
         "binary": "cam4_r_base.riscv",
         "args": [],
         "stdin": None,
     },
-    "imagick": {
-        "spec_num": "538.imagick_r",
-        "binary": "imagick_r_base.riscv",
-        "args": ["-limit", "disk", "0", "refrate_input.tga", "-edge", "41",
-                 "-resample", "181%", "-emboss", "31", "-colorspace", "YUV",
-                 "-mean-shift", "19x19+15%", "-resize", "30%",
-                 "refrate_output.tga"],
-        "stdin": None,
-    },
+    # "imagick": {
+    #     "spec_num": "538.imagick_r",
+    #     "binary": "imagick_r_base.riscv",
+    #     "args": ["-limit", "disk", "0", "refrate_input.tga", "-edge", "41",
+    #              "-resample", "181%", "-emboss", "31", "-colorspace", "YUV",
+    #              "-mean-shift", "19x19+15%", "-resize", "30%",
+    #              "refrate_output.tga"],
+    #     "stdin": None,
+    # },
     "nab": {
         "spec_num": "544.nab_r",
         "binary": "nab_r_base.riscv",
         "args": ["1am0", "1122214447", "122"],
         "stdin": None,
     },
-    "fotonik3d": {
-        "spec_num": "549.fotonik3d_r",
-        "binary": "fotonik3d_r_base.riscv",
-        "args": [],
-        "stdin": None,
-    },
+    # "fotonik3d": {
+    #     "spec_num": "549.fotonik3d_r",
+    #     "binary": "fotonik3d_r_base.riscv",
+    #     "args": [],
+    #     "stdin": None,
+    # },
     "roms": {
         "spec_num": "554.roms_r",
         "binary": "roms_r_base.riscv",
