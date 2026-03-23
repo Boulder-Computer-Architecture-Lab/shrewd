@@ -85,6 +85,7 @@ ThreadState::unserialize(CheckpointIn &cp)
     // context switches correctly restore the protection state.
 #ifdef TARGET_RISCV
     protectionFlag = (tc->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
+    committedProtectionFlag = protectionFlag;
 #endif
     noCommitCountFlag = false;
     faultInjectActive = false;

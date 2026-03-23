@@ -1336,10 +1336,10 @@ decode QUADRANT default Unknown::unknown() {
         0x02: decode FUNCT3 {
             format SystemOp {
                 0x0: secoff({{
-                    xc->setMiscReg(MISCREG_PROTECTION, 0);
+                    //Only modifies micro flag so no changes to architecture needed
                 }}, No_OpClass);
                 0x1: secon({{
-                    xc->setMiscReg(MISCREG_PROTECTION, 1);
+                    //Only modifies micro flag so no changes to architecture needed
                 }}, No_OpClass);
             }
         }

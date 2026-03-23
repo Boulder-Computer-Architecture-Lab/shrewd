@@ -94,6 +94,11 @@ class ThreadState : public gem5::ThreadState
     // Microarchitectural protection flag used for speculation
     bool protectionFlag = false;
 
+    // Last committed (non-speculative) protection status.
+    // Updated at commit time from inst->protected_; used instead of
+    // MISCREG_PROTECTION CSR for squash recovery.
+    bool committedProtectionFlag = false;
+
     // Microarchitectural no-count flag used for speculation
     bool noCommitCountFlag = false;
 

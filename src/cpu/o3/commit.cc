@@ -65,13 +65,6 @@
 #include "sim/faults.hh"
 #include "sim/full_system.hh"
 
-// SHREWD: Include RISCV misc registers for MISCREG_PROTECTION access
-// Used to restore protectionFlag from architectural state on trap/TC squashes
-#ifdef TARGET_RISCV
-#include "arch/riscv/regs/misc.hh"
-using namespace gem5::RiscvISA;
-#endif
-
 namespace gem5
 {
 
@@ -525,19 +518,11 @@ Commit::squashFromTrap(ThreadID tid)
 
     DPRINTF(Commit, "Squashing from trap, restarting at PC %s\n", *pc[tid]);
 
-    // SHREWD: Restore protection flag from the architectural CSR state.
+    // SHREWD: Restore protection flag from the last committed state.
     // On trap squashes, we flush all speculative state and restart from
-    // a trap handler. The CSR reflects the last committed secon/secoff,
-    // so we sync the microarchitectural flag to that value.
-    if (shrewdDefaultOn) {
-        thread[tid]->protectionFlag = true;
-    }
-#ifdef TARGET_RISCV
-    else {
-        thread[tid]->protectionFlag =
-            (thread[tid]->getTC()->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
-    }
-#endif
+    // a trap handler. committedProtectionFlag tracks the last committed
+    // secon/secoff, so we sync the microarchitectural flag to that value.
+    thread[tid]->protectionFlag = thread[tid]->committedProtectionFlag;
     thread[tid]->noCommitCountFlag = false;
 
     thread[tid]->trapPending = false;
@@ -557,19 +542,10 @@ Commit::squashFromTC(ThreadID tid)
 
     DPRINTF(Commit, "Squashing from TC, restarting at PC %s\n", *pc[tid]);
 
-    // SHREWD: Restore protection flag from architectural CSR state.
+    // SHREWD: Restore protection flag from the last committed state.
     // TC (ThreadContext) squashes occur when external writes to thread
-    // context require flushing speculative state. The CSR contains the
-    // last committed protection state, so we restore from it.
-    if (shrewdDefaultOn) {
-        thread[tid]->protectionFlag = true;
-    }
-#ifdef TARGET_RISCV
-    else {
-        thread[tid]->protectionFlag =
-            (thread[tid]->getTC()->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
-    }
-#endif
+    // context require flushing speculative state.
+    thread[tid]->protectionFlag = thread[tid]->committedProtectionFlag;
     thread[tid]->noCommitCountFlag = false;
 
     thread[tid]->noSquashFromTC = false;
@@ -589,18 +565,9 @@ Commit::squashFromSquashAfter(ThreadID tid)
 
     squashAll(tid);
 
-    // SHREWD: Restore protection flag from architectural CSR state.
+    // SHREWD: Restore protection flag from the last committed state.
     // SquashAfter squashes occur after instructions like fence_i commit.
-    // Restore the flag from the committed CSR value.
-    if (shrewdDefaultOn) {
-        thread[tid]->protectionFlag = true;
-    }
-#ifdef TARGET_RISCV
-    else {
-        thread[tid]->protectionFlag =
-            (thread[tid]->getTC()->readMiscRegNoEffect(MISCREG_PROTECTION) != 0);
-    }
-#endif
+    thread[tid]->protectionFlag = thread[tid]->committedProtectionFlag;
     thread[tid]->noCommitCountFlag = false;
 
     // Make sure to inform the fetch stage of which instruction caused
@@ -1012,6 +979,13 @@ Commit::commitInsts()
 
             if (commit_success) {
                 ++num_committed;
+
+                // SHREWD: Latch the committed protection state.
+                // The last committed instruction's protected_ flag is
+                // the non-speculative protection status.
+                thread[tid]->committedProtectionFlag =
+                    head_inst->protected_;
+
                 cpu->commitStats[tid]
                     ->committedInstType[head_inst->opClass()]++;
                 stats.committedInstType[tid][head_inst->opClass()]++;

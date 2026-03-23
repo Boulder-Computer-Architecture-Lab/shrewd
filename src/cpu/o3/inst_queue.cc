@@ -900,6 +900,8 @@ InstructionQueue::scheduleReadyInsts()
         if(enableShrewd && priorityToShadow && issuing_inst->protected_){
         // Ask for shadow unit to check the result.
         requestShadow(idx, idx_shadow, op_class, shadow_op_class, has_shadow, op_latency);
+        //if (has_shadow)
+          //  ++total_issued;
         }
         // If we have an instruction that doesn't require a FU, or a
         // valid FU, then schedule for execution.

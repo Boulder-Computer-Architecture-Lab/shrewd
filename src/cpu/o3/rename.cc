@@ -795,11 +795,7 @@ Rename::renameInsts(ThreadID tid)
             loadsInProgress[tid]++;
         }
 
-        ++renamed_insts;
-        // Notify potential listeners that source and destination registers for
-        // this instruction have been renamed.
-        ppRename->notify(inst);
-
+        
         if (is_sec_ctrl || cpu->thread[tid]->noCommitCountFlag) {
             inst->noCommitCount_ = true;
         }
@@ -814,6 +810,33 @@ Rename::renameInsts(ThreadID tid)
             inst->savedFaultInjectCount = cpu->thread[tid]->faultInjectCount;
             inst->savedFaultInjectTarget = cpu->thread[tid]->faultInjectTarget;
         }
+
+       
+        if (is_sec_ctrl) {
+            DPRINTF(Rename, "Dropping %s [sn:%llu] from pipeline "
+                    "(protection flag handled at rename).\n",
+                    inst_name, inst->seqNum);
+
+            // Dropped instructions never enter the ROB, so they would
+            // never be committed or squash-removed through normal pipeline
+            // paths — leaking their DynInst objects in cpu->instList
+            // indefinitely.  Erase directly from instList here rather
+            // than using squashInstIt/removeList, which can lead to a
+            // double-erase segfault if a later squash walk also pushes
+            // the same iterator into removeList.
+            inst->setSquashed();
+            cpu->instList.erase(inst->getInstListIt());
+
+            --insts_available;
+            continue;
+        }
+
+        // Only count instructions that actually enter the pipeline.
+        ++renamed_insts;
+        // Notify potential listeners that source and destination registers for
+        // this instruction have been renamed.
+        ppRename->notify(inst);
+
 
         // Put instruction in rename queue.
         toIEW->insts[toIEWIndex] = inst;

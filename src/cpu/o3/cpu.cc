@@ -317,6 +317,7 @@ CPU::CPU(const BaseO3CPUParams &params)
     if (params.shrewdDefaultOn) {
         for (ThreadID tid = 0; tid < numThreads; ++tid) {
             thread[tid]->protectionFlag = true;
+            thread[tid]->committedProtectionFlag = true;
 
             // Hardcoded to MISCREG_PROTECTION
             isa[tid]->setMiscRegNoEffect(193, 1);
