@@ -54,6 +54,30 @@ parser.add_argument(
     action="store_true",
     help="Accepted for compatibility; O3-only mode always runs to completion",
 )
+parser.add_argument("--mechanism", default="FuDup",
+                    choices=["FuDup", "Die", "Diva"],
+                    help="How protected instructions are checked")
+parser.add_argument("--diva-policy", default="Marked",
+                    choices=["Marked", "Kernel", "All"],
+                    help="Which instructions the Diva checker verifies")
+parser.add_argument("--diva-width", type=int, default=2,
+                    help="Diva checks started per cycle")
+parser.add_argument("--diva-latency", type=int, default=4,
+                    help="Cycles from completion until a Diva check is done")
+parser.add_argument("--shadow-policy", default="SpatialWait",
+                    choices=["Opportunistic", "SpatialWait", "Temporal", "Hybrid"],
+                    help="What a protected inst does when no partner FU is free")
+parser.add_argument("--shadow-compare-latency", type=int, default=0,
+                    help="Cycles to compare primary and shadow results")
+parser.add_argument("--stuck-fu", default=None, metavar="CLASS[:N]",
+                    help="Permanent fault: the N-th unit (default 0) with op "
+                         "class CLASS (e.g. FloatAdd) corrupts its results")
+parser.add_argument("--markers-only", action="store_true",
+                    help="Execute secon/secoff (dropped at rename) but check "
+                         "nothing: the cost of the markers alone")
+parser.add_argument("--legacy-shadow", action="store_true",
+                    help="Original model: Opportunistic shadows that take no "
+                         "issue slot and no compare latency")
 args, benchmark_args = parser.parse_known_args()
 
 if benchmark_args and benchmark_args[0] == "--benchmark-args":
@@ -102,10 +126,26 @@ board.set_se_binary_workload(
 # ---------------------------------------------------------------------------
 for core in processor.get_cores():
     sim_core = core.get_simobject()
+    sim_core.shaftCommitLog = True
+    if args.stuck_fu:
+        op_class, _, n = args.stuck_fu.partition(":")
+        sim_core.stuckFuOpClass = op_class
+        sim_core.stuckFuInstance = int(n or 0)
 
-    if not args.no_shrewd:
+    if not args.no_shrewd and not args.markers_only:
         sim_core.enableShrewd = True
+        sim_core.shaftMechanism = args.mechanism
+        sim_core.divaPolicy = args.diva_policy
+        sim_core.divaWidth = args.diva_width
+        sim_core.divaLatency = args.diva_latency
         sim_core.priorityToShadow = True
+        if args.legacy_shadow:
+            sim_core.shadowPolicy = "Opportunistic"
+            sim_core.shadowUsesIssueSlot = False
+            sim_core.shadowCompareLatency = 0
+        else:
+            sim_core.shadowPolicy = args.shadow_policy
+            sim_core.shadowCompareLatency = args.shadow_compare_latency
         if args.shrewd_default_on:
             sim_core.shrewdDefaultOn = True
 

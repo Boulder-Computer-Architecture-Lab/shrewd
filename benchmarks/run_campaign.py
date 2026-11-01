@@ -138,6 +138,35 @@ def _duplicate_binary(base_binary):
     return base_binary.replace(".riscv", ".duplicate.riscv")
 
 
+def _matched_baseline_binary(base_binary):
+    """Unpatched build with the same flags as the protected binaries."""
+    return base_binary.replace(".riscv", ".baseline.riscv")
+
+
+# Set from --spec-baseline: use the SPEC-built binary for baseline/100pct
+# instead of the matched build (only to reproduce the old results).
+USE_SPEC_BASELINE = False
+
+
+def _baseline_run(bench, cfg):
+    """(binary_path, run_dir, stdin_path) for the unprotected baseline.
+
+    By default this is the matched build in protected_binaries/<b>/baseline,
+    compiled with the same -fno-inline/-fno-schedule-insns flags as the
+    protected and duplicate binaries, so overheads compare like with like.
+    Inputs always come from the SPEC run directory, which has all of them.
+    """
+    run_dir = (BASELINE_DIR / cfg["spec_num"] / "run" /
+               "run_base_refrate_riscv.0000")
+    if USE_SPEC_BASELINE:
+        binary_path = BASELINE_DIR / cfg["spec_num"] / "exe" / cfg["binary"]
+    else:
+        binary_path = (PROTECTED_DIR / bench / "baseline" /
+                       _matched_baseline_binary(cfg["binary"]))
+    stdin_path = str(run_dir / cfg["stdin"]) if cfg["stdin"] else None
+    return binary_path, run_dir, stdin_path
+
+
 # ── Parse top3_summary.txt ───────────────────────────────────────────────
 
 def parse_simpoint_summary(summary_path):
@@ -197,9 +226,7 @@ def build_run_list(benchmarks, variants, simpoints_map):
             continue
 
         if "baseline" in variants:
-            run_dir = BASELINE_DIR / spec_num / "run" / "run_base_refrate_riscv.0000"
-            binary_path = BASELINE_DIR / spec_num / "exe" / cfg["binary"]
-            stdin_path = str(run_dir / cfg["stdin"]) if cfg["stdin"] else None
+            binary_path, run_dir, stdin_path = _baseline_run(bench, cfg)
 
             if binary_path.exists():
                 for interval, weight in sp_list:
@@ -220,9 +247,7 @@ def build_run_list(benchmarks, variants, simpoints_map):
                 if level == "100pct":
                     # 100% HW duplication: baseline binary + Shrewd on O3
                     # duplicates everything (no SW annotations needed)
-                    run_dir = BASELINE_DIR / spec_num / "run" / "run_base_refrate_riscv.0000"
-                    binary_path = BASELINE_DIR / spec_num / "exe" / cfg["binary"]
-                    stdin_path = str(run_dir / cfg["stdin"]) if cfg["stdin"] else None
+                    binary_path, run_dir, stdin_path = _baseline_run(bench, cfg)
                     if binary_path.exists():
                         for interval, weight in sp_list:
                             runs.append((
@@ -276,8 +301,50 @@ def build_run_list(benchmarks, variants, simpoints_map):
 
 # ── Single simulation launcher ────────────────────────────────────────────
 
+def checkpoint_key(variant):
+    """Checkpoint directory per binary: baseline and 100pct share one."""
+    return "baseline" if variant == "100pct" else variant
+
+
+def checkpoint_jobs(runs):
+    """One checkpoint pass per (benchmark, binary), covering its intervals."""
+    jobs = {}
+    for (bench, variant, binary_path, run_dir, bench_args, stdin_path,
+         interval, _weight, shrewd_param) in runs:
+        key = (bench, checkpoint_key(variant))
+        job = jobs.setdefault(key, {
+            "binary": binary_path, "run_dir": run_dir, "args": bench_args,
+            "stdin": stdin_path, "no_count": shrewd_param == "no_shrewd",
+            "intervals": set(),
+        })
+        job["intervals"].add(interval)
+    return jobs
+
+
+def run_checkpoint_job(key, job, gem5_binary, checkpoint_root):
+    bench, ckpt_variant = key
+    outdir = os.path.join(checkpoint_root, bench, ckpt_variant)
+    os.makedirs(outdir, exist_ok=True)
+    cmd = [
+        str(gem5_binary), "-d", outdir, str(SCRIPT_DIR / "make_checkpoints.py"),
+        "--binary", job["binary"],
+        "--simpoint-intervals", ",".join(str(i) for i in sorted(job["intervals"])),
+    ]
+    if job["no_count"]:
+        cmd.append("--secon-no-count")
+    if job["stdin"]:
+        cmd += ["--stdin", job["stdin"]]
+    if job["args"]:
+        cmd += ["--benchmark-args"] + job["args"]
+    with open(os.path.join(outdir, "checkpoint_run.log"), "w") as log:
+        result = subprocess.run(cmd, stdout=log, stderr=subprocess.STDOUT,
+                                cwd=job["run_dir"])
+    return key, result.returncode
+
+
 def run_gem5_simulation(run_spec, gem5_binary, gem5_config, results_dir,
-                        duplicate_results_dir):
+                        duplicate_results_dir, shadow_args=(),
+                        checkpoint_root=None):
     """
     Launch one gem5 SimPoint simulation.  Returns a result dict.
     """
@@ -309,6 +376,13 @@ def run_gem5_simulation(run_spec, gem5_binary, gem5_config, results_dir,
     elif shrewd_param != "None":
         print(f"Invalid shrewd_param value: {shrewd_param}")
         sys.exit(1) # Exits with a status code of 1 (indicating an error)
+    if shrewd_param != "no_shrewd":
+        cmd += list(shadow_args)
+    if checkpoint_root:
+        ckpt = os.path.join(checkpoint_root, bench, checkpoint_key(variant),
+                            f"simpoint_{interval}")
+        if os.path.exists(os.path.join(ckpt, "shaft_meta.json")):
+            cmd += ["--checkpoint", ckpt]
 
     if bench_args:
         cmd += ["--benchmark-args"] + bench_args
@@ -352,7 +426,7 @@ def parse_stats(stats_path):
                     cycles = int(line.split()[1])
                 except (IndexError, ValueError):
                     pass
-            if "board.processor.switch.core.committedInsts" in line:
+            if "board.processor.switch.core.commitStats0.numInsts" in line:
                 try:
                     insts = int(line.split()[1])
                 except (IndexError, ValueError):
@@ -384,7 +458,47 @@ def main():
     parser.add_argument("--simpoint-summary", type=str,
                         default=str(SIMPOINT_SUMMARY),
                         help="Path to top3_summary.txt")
+    parser.add_argument("--spec-baseline", action="store_true",
+                        help="Use the SPEC-built binary for baseline/100pct "
+                             "(old, flag-mismatched results)")
+    parser.add_argument("--mechanism", default="FuDup",
+                        choices=["FuDup", "Die", "Diva"],
+                        help="Protection mechanism for HW-protected runs")
+    parser.add_argument("--diva-policy", default="Marked",
+                        choices=["Marked", "Kernel", "All"],
+                        help="Instructions the Diva checker verifies")
+    parser.add_argument("--diva-width", type=int, default=2,
+                        help="Diva checks started per cycle")
+    parser.add_argument("--diva-latency", type=int, default=4,
+                        help="Diva check latency in cycles")
+    parser.add_argument("--shadow-policy", default="SpatialWait",
+                        choices=["Opportunistic", "SpatialWait", "Temporal", "Hybrid"],
+                        help="Shadow policy for HW-protected runs")
+    parser.add_argument("--shadow-compare-latency", type=int, default=0,
+                        help="Compare latency (cycles) for HW-protected runs")
+    parser.add_argument("--legacy-shadow", action="store_true",
+                        help="Original shadow model (overrides the two above)")
+    parser.add_argument("--make-checkpoints", type=str, default=None,
+                        metavar="DIR",
+                        help="Only take SimPoint checkpoints into DIR "
+                             "(one ATOMIC pass per binary), then exit")
+    parser.add_argument("--checkpoint-root", type=str, default=None,
+                        metavar="DIR",
+                        help="Restore runs from checkpoints in DIR when present")
     cli = parser.parse_args()
+
+    global USE_SPEC_BASELINE
+    USE_SPEC_BASELINE = cli.spec_baseline
+    shadow_args = ["--mechanism", cli.mechanism,
+                   "--diva-policy", cli.diva_policy,
+                   "--diva-width", str(cli.diva_width),
+                   "--diva-latency", str(cli.diva_latency)]
+    if cli.legacy_shadow:
+        shadow_args += ["--legacy-shadow"]
+    else:
+        shadow_args += ["--shadow-policy", cli.shadow_policy,
+                        "--shadow-compare-latency",
+                        str(cli.shadow_compare_latency)]
 
     gem5_binary = Path(cli.gem5)
     gem5_config = Path(cli.config)
@@ -426,6 +540,22 @@ def main():
     if not runs:
         sys.exit("ERROR: No valid benchmark runs found. Check paths.")
 
+    if cli.make_checkpoints:
+        jobs = checkpoint_jobs(runs)
+        print(f"Taking checkpoints for {len(jobs)} binaries into "
+              f"{cli.make_checkpoints} ({cli.jobs} parallel)")
+        with ProcessPoolExecutor(max_workers=cli.jobs) as executor:
+            futures = [executor.submit(run_checkpoint_job, key, job,
+                                       gem5_binary, cli.make_checkpoints)
+                       for key, job in jobs.items()]
+            failed = 0
+            for future in as_completed(futures):
+                (bench, ckpt_variant), rc = future.result()
+                failed += rc != 0
+                print(f"  {bench}/{ckpt_variant}: "
+                      f"{'OK' if rc == 0 else f'FAIL(rc={rc})'}")
+        sys.exit(1 if failed else 0)
+
     print(f"{'=' * 78}")
     print(f"SPEC2017 gem5 SimPoint-based Evaluation")
     print(f"{'=' * 78}")
@@ -450,7 +580,8 @@ def main():
         for run_spec in runs:
             future = executor.submit(
                 run_gem5_simulation, run_spec, gem5_binary, gem5_config,
-                cli.results_dir, cli.duplicate_results_dir,
+                cli.results_dir, cli.duplicate_results_dir, shadow_args,
+                cli.checkpoint_root,
             )
             future_to_run[future] = run_spec
 

@@ -268,11 +268,6 @@ class IEW
      */
     void squashDueToMemOrder(const DynInstPtr &inst, ThreadID tid);
 
-    /** Sends commit proper information for a squash due to a Shrewd
-     * fault-injected protected instruction.
-     */
-    void squashDueToShrewdFault(const DynInstPtr &inst, ThreadID tid);
-
     /** Sets Dispatch to blocked, and signals back to other stages to block. */
     void block(ThreadID tid);
 

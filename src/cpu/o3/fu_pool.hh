@@ -86,6 +86,9 @@ class FUPool : public SimObject
     /** Bitvector listing which FUs are busy. */
     std::vector<bool> unitBusy;
 
+    /** Units taken out of service (they stay busy). */
+    std::vector<bool> unitDisabled;
+
     /** List of units to be freed at the end of this cycle. */
     std::vector<int> unitsToBeFreed;
 
@@ -181,6 +184,19 @@ class FUPool : public SimObject
 
     /** Frees a FU at the end of this cycle. */
     void freeUnitNextCycle(int fu_idx);
+
+    /** Returns a FU obtained this cycle with getUnit() but not used. */
+    void releaseUnit(int fu_idx);
+
+    /** The n-th unit (0-based) that provides a capability, or -1. */
+    int unitWith(OpClass capability, unsigned n) const;
+
+    /** Takes a unit out of service for good, as after diagnosing a
+     * permanent fault in it. */
+    void disableUnit(int fu_idx);
+
+    /** Whether getUnit() can provide a shadow FU for this capability. */
+    static bool hasShadowCapability(OpClass capability);
 
     /** Frees all FUs on the list. */
     void processFreeUnits();

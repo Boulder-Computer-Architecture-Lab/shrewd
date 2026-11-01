@@ -46,6 +46,7 @@
 #include "base/compiler.hh"
 #include "base/loader/symtab.hh"
 #include "base/logging.hh"
+#include "base/output.hh"
 #include "cpu/base.hh"
 #include "cpu/checker/cpu.hh"
 #include "cpu/exetrace.hh"
@@ -83,6 +84,15 @@ Commit::Commit(CPU *_cpu, const BaseO3CPUParams &params)
     : commitPolicy(params.smtCommitPolicy),
       cpu(_cpu),
     shrewdDefaultOn(params.shrewdDefaultOn),
+      seconNoCountMode(params.seconNoCountMode),
+      shaftArchMiscReg(params.shaftArchMiscReg),
+      shaftCommitLog(params.shaftCommitLog),
+      divaEnabled(params.enableShrewd &&
+                  params.shaftMechanism == ShaftMechanism::Diva),
+      divaPolicy(params.divaPolicy),
+      divaWidth(params.divaWidth),
+      divaLatency(params.divaLatency),
+      divaLoadLatency(params.divaLoadLatency),
       iewToCommitDelay(params.iewToCommitDelay),
       commitToIEWDelay(params.commitToIEWDelay),
       renameToROBDelay(params.renameToROBDelay),
@@ -129,9 +139,69 @@ Commit::Commit(CPU *_cpu, const BaseO3CPUParams &params)
         htmStops[tid] = 0;
     }
     interrupt = NoFault;
+
+    if (shaftCommitLog) {
+        // The log covers the same window as the stats (e.g. one SimPoint).
+        statistics::registerResetCallback([this]() { shaftPcCounts.clear(); });
+        statistics::registerDumpCallback([this]() { dumpShaftCommitLog(); });
+    }
 }
 
 std::string Commit::name() const { return cpu->name() + ".commit"; }
+
+bool
+Commit::divaNeedsCheck(const DynInstPtr &inst, ThreadID tid)
+{
+    // SW-duplicate regions and DIE twins are not program instructions.
+    if (inst->noCommitCount_)
+        return false;
+
+    switch (divaPolicy) {
+      case DivaPolicy::Marked:
+        return inst->protected_;
+      case DivaPolicy::Kernel:
+        // From in-order architectural state, not the speculative P-bit:
+        // privilege changes serialize, so this is the head's own mode.
+        return !cpu->tcBase(tid)->getIsaPtr()->inUserMode();
+      case DivaPolicy::All:
+        return true;
+      default:
+        panic("Unknown Diva policy %d.\n", static_cast<int>(divaPolicy));
+    }
+}
+
+void
+Commit::logShaftCommit(const DynInstPtr &inst)
+{
+    // SW-duplicate regions (seconNoCountMode) are excluded, as from the
+    // committed instruction count.
+    if (inst->noCommitCount_)
+        return;
+
+    ShaftPcCount &count = shaftPcCounts[inst->pcState().instAddr()];
+    if (count.committed == 0)
+        count.mnemonic = inst->staticInst->getName();
+    ++count.committed;
+    if (inst->protected_) {
+        ++count.protectedInsts;
+        if (inst->shaftChecked())
+            ++count.checked;
+    }
+}
+
+void
+Commit::dumpShaftCommitLog()
+{
+    OutputStream *file = simout.create(cpu->name() + ".shaft_pcs.csv");
+    std::ostream &os = *file->stream();
+    os << "pc,mnemonic,committed,protected,checked\n";
+    for (const auto &[pc, count] : shaftPcCounts) {
+        os << "0x" << std::hex << pc << std::dec << ',' << count.mnemonic
+           << ',' << count.committed << ',' << count.protectedInsts << ','
+           << count.checked << '\n';
+    }
+    simout.close(file);
+}
 
 void
 Commit::regProbePoints()
@@ -164,7 +234,27 @@ Commit::CommitStats::CommitStats(CPU *cpu, Commit *commit)
       ADD_STAT(committedInstType, statistics::units::Count::get(),
                "Class of committed instruction"),
       ADD_STAT(commitEligibleSamples, statistics::units::Cycle::get(),
-               "number cycles where commit BW limit reached")
+               "number cycles where commit BW limit reached"),
+      ADD_STAT(dieTwinsRetired, statistics::units::Count::get(),
+               "DIE twins retired with their primary"),
+      ADD_STAT(dieTwinWaitCycles, statistics::units::Cycle::get(),
+               "Cycles a primary at the ROB head waited for its DIE twin"),
+      ADD_STAT(dieMismatches, statistics::units::Count::get(),
+               "DIE primaries that mismatched their twin and re-executed"),
+      ADD_STAT(divaChecked, statistics::units::Count::get(),
+               "Instructions verified by the Diva checker"),
+      ADD_STAT(divaGateStallCycles, statistics::units::Cycle::get(),
+               "Cycles the ROB head waited for its Diva check"),
+      ADD_STAT(divaMismatches, statistics::units::Count::get(),
+               "Diva-checked instructions that mismatched and re-executed"),
+      ADD_STAT(faultsCommitted, statistics::units::Count::get(),
+               "Injected faults that retired undetected"),
+      ADD_STAT(protectedFaultsCommitted, statistics::units::Count::get(),
+               "Injected faults that retired undetected in protected "
+               "instructions (the mechanism missed them)"),
+      ADD_STAT(protectionToggles, statistics::units::Count::get(),
+               "Protection changes between consecutive committed "
+               "instructions (markers a region-marked binary executes)")
 {
     using namespace statistics;
 
@@ -511,19 +601,56 @@ Commit::squashAll(ThreadID tid)
     set(toIEW->commitInfo[tid].pc, pc[tid]);
 }
 
+ShaftRestore
+Commit::shaftRestoreAtHead(ThreadID tid)
+{
+    // A twin at the head means its primary committed: same as restarting
+    // after the last committed instruction.
+    if (rob->isEmpty(tid) || rob->readHeadInst(tid)->isShaftTwin_)
+        return shaftRestoreCommitted(tid);
+
+    // Markers never reach the ROB, so the head's pre-rename mode is also
+    // the mode after it. The injector resumes from its post-rename state,
+    // so a re-executed head is not marked again.
+    const DynInstPtr &head = rob->readHeadInst(tid);
+    ShaftRestore restore;
+    restore.valid = true;
+    restore.protectionFlag = head->savedProtectionFlag;
+    restore.noCommitCountFlag = head->savedNoCommitCountFlag;
+    restore.injectorValid = true;
+    restore.faultInjectActive = head->faultInjectActive_;
+    restore.faultInjectCount = head->faultInjectCount_;
+    restore.faultInjectTarget = head->faultInjectTarget_;
+    return restore;
+}
+
+ShaftRestore
+Commit::shaftRestoreCommitted(ThreadID tid)
+{
+    // Execution restarts right after the last committed instruction, so
+    // any marker after it is re-fetched and re-applied.
+    ShaftRestore restore;
+    restore.valid = true;
+    restore.protectionFlag = thread[tid]->committedProtectionFlag;
+    restore.noCommitCountFlag = thread[tid]->committedNoCommitCountFlag;
+    restore.injectorValid = true;
+    restore.faultInjectActive = thread[tid]->committedFaultInjectActive;
+    restore.faultInjectCount = thread[tid]->committedFaultInjectCount;
+    restore.faultInjectTarget = thread[tid]->committedFaultInjectTarget;
+    return restore;
+}
+
 void
 Commit::squashFromTrap(ThreadID tid)
 {
+    // Read before squashAll: the head is the trapping instruction.
+    const ShaftRestore restore = shaftRestoreAtHead(tid);
+
     squashAll(tid);
 
     DPRINTF(Commit, "Squashing from trap, restarting at PC %s\n", *pc[tid]);
 
-    // SHREWD: Restore protection flag from the last committed state.
-    // On trap squashes, we flush all speculative state and restart from
-    // a trap handler. committedProtectionFlag tracks the last committed
-    // secon/secoff, so we sync the microarchitectural flag to that value.
-    thread[tid]->protectionFlag = thread[tid]->committedProtectionFlag;
-    thread[tid]->noCommitCountFlag = false;
+    toIEW->commitInfo[tid].shaftRestore = restore;
 
     thread[tid]->trapPending = false;
     thread[tid]->noSquashFromTC = false;
@@ -542,11 +669,7 @@ Commit::squashFromTC(ThreadID tid)
 
     DPRINTF(Commit, "Squashing from TC, restarting at PC %s\n", *pc[tid]);
 
-    // SHREWD: Restore protection flag from the last committed state.
-    // TC (ThreadContext) squashes occur when external writes to thread
-    // context require flushing speculative state.
-    thread[tid]->protectionFlag = thread[tid]->committedProtectionFlag;
-    thread[tid]->noCommitCountFlag = false;
+    toIEW->commitInfo[tid].shaftRestore = shaftRestoreCommitted(tid);
 
     thread[tid]->noSquashFromTC = false;
     assert(!thread[tid]->trapPending);
@@ -565,10 +688,8 @@ Commit::squashFromSquashAfter(ThreadID tid)
 
     squashAll(tid);
 
-    // SHREWD: Restore protection flag from the last committed state.
-    // SquashAfter squashes occur after instructions like fence_i commit.
-    thread[tid]->protectionFlag = thread[tid]->committedProtectionFlag;
-    thread[tid]->noCommitCountFlag = false;
+    // The squash-after instruction itself committed.
+    toIEW->commitInfo[tid].shaftRestore = shaftRestoreCommitted(tid);
 
     // Make sure to inform the fetch stage of which instruction caused
     // the squash. It'll try to re-fetch an instruction executing in
@@ -826,6 +947,8 @@ Commit::commit()
                 fromIEW->mispredictInst[tid];
             toIEW->commitInfo[tid].branchTaken =
                 fromIEW->branchTaken[tid];
+            toIEW->commitInfo[tid].shaftRestore =
+                fromIEW->shaftRestore[tid];
             toIEW->commitInfo[tid].squashInst =
                                     rob->findInst(tid, squashed_inst);
             if (toIEW->commitInfo[tid].mispredictInst) {
@@ -972,19 +1095,111 @@ Commit::commitInsts()
               head_inst->seqNum,
               head_inst->opClass());
         } else {
-            set(pc[tid], head_inst->pcState());
+            // DIE: a primary retires once its twin has completed too, and
+            // the two results are compared. A fault in exactly one of them
+            // is a mismatch: re-execute the primary from fetch (its
+            // dependents may already have used the faulty value).
+            const DynInstPtr &twin = head_inst->shaftTwin;
+            if (twin && !twin->isSquashed() &&
+                    head_inst->getFault() == NoFault) {
+                if (!twin->readyToCommit()) {
+                    ++stats.dieTwinWaitCycles;
+                    break;
+                }
+                if (head_inst->faultInjected_ != twin->faultInjected_) {
+                    head_inst->getFault() = std::make_shared<ReExec>();
+                    iewStage->getInstQueue()->retireStuckFu();
+                    ++stats.dieMismatches;
+                }
+            }
+            // Diva: a checked instruction retires only once the checker has
+            // verified it. Its check starts at the later of its completion
+            // and the slot after the previous check (divaWidth per cycle,
+            // in program order), and is done divaLatency later.
+            if (divaEnabled && head_inst->getFault() == NoFault &&
+                    divaNeedsCheck(head_inst, tid)) {
+                if (!head_inst->divaChecked_) {
+                    const uint64_t ready =
+                        uint64_t(head_inst->shaftCompleteCycle) * divaWidth;
+                    divaLastStart = std::max(ready, divaLastStart + 1);
+                    head_inst->divaDoneCycle =
+                        Cycles(divaLastStart / divaWidth) + divaLatency +
+                        (head_inst->isLoad() ? divaLoadLatency : Cycles(0));
+                    head_inst->divaChecked_ = true;
+                    ++stats.divaChecked;
+                }
+                if (cpu->curCycle() < head_inst->divaDoneCycle) {
+                    ++stats.divaGateStallCycles;
+                    break;
+                }
+                // The checker's result differs from the core's: re-execute.
+                if (head_inst->faultInjected_) {
+                    head_inst->getFault() = std::make_shared<ReExec>();
+                    iewStage->getInstQueue()->retireStuckFu();
+                    ++stats.divaMismatches;
+                }
+            }
+
+            // A twin is not a program instruction: the committed PC, PC
+            // events and draining all follow its primary.
+            const bool is_twin = head_inst->isShaftTwin_;
+            if (!is_twin)
+                set(pc[tid], head_inst->pcState());
 
             // Try to commit the head instruction.
             bool commit_success = commitHead(head_inst, num_committed);
 
             if (commit_success) {
                 ++num_committed;
+                if (head_inst->isShaftTwin_)
+                    ++stats.dieTwinsRetired;
+                // A twin has no destination: its fault corrupts nothing.
+                if (head_inst->faultInjected_ && !is_twin) {
+                    ++stats.faultsCommitted;
+                    if (head_inst->protected_)
+                        ++stats.protectedFaultsCommitted;
+                }
 
                 // SHREWD: Latch the committed protection state.
                 // The last committed instruction's protected_ flag is
-                // the non-speculative protection status.
-                thread[tid]->committedProtectionFlag =
-                    head_inst->protected_;
+                // the non-speculative protection status. Markers never
+                // commit, so these are the modes after the instruction.
+                // A DIE twin carries none of this state.
+                if (!is_twin) {
+                    if (!head_inst->noCommitCount_) {
+                        if (head_inst->protected_ !=
+                                lastCommittedProtected[tid]) {
+                            ++stats.protectionToggles;
+                        }
+                        lastCommittedProtected[tid] = head_inst->protected_;
+                    }
+                    thread[tid]->committedProtectionFlag =
+                        head_inst->protected_;
+                    thread[tid]->committedNoCommitCountFlag =
+                        head_inst->noCommitCount_;
+                    thread[tid]->committedFaultInjectActive =
+                        head_inst->faultInjectActive_;
+                    thread[tid]->committedFaultInjectCount =
+                        head_inst->faultInjectCount_;
+                    thread[tid]->committedFaultInjectTarget =
+                        head_inst->faultInjectTarget_;
+                }
+                if (shaftCommitLog)
+                    logShaftCommit(head_inst);
+
+                // Keep the architectural copy current (switch-out,
+                // checkpoints): it mirrors whichever region the
+                // markers delimit in this mode.
+                if (shaftArchMiscReg >= 0) {
+                    const RegVal mode = seconNoCountMode ?
+                        thread[tid]->committedNoCommitCountFlag :
+                        thread[tid]->committedProtectionFlag;
+                    if (cpu->readMiscRegNoEffect(shaftArchMiscReg, tid) !=
+                            mode) {
+                        cpu->setMiscRegNoEffect(shaftArchMiscReg, mode,
+                                                tid);
+                    }
+                }
 
                 cpu->commitStats[tid]
                     ->committedInstType[head_inst->opClass()]++;
@@ -1031,9 +1246,11 @@ Commit::commitInsts()
                     cpu->checker->verify(head_inst);
                 }
 
-                cpu->traceFunctions(pc[tid]->instAddr());
+                if (!is_twin) {
+                    cpu->traceFunctions(pc[tid]->instAddr());
 
-                head_inst->staticInst->advancePC(*pc[tid]);
+                    head_inst->staticInst->advancePC(*pc[tid]);
+                }
 
                 // Keep track of the last sequence number commited
                 lastCommitedSeqNum[tid] = head_inst->seqNum;
@@ -1043,7 +1260,7 @@ Commit::commitInsts()
                 if (head_inst->isSquashAfter())
                     squashAfter(tid, head_inst);
 
-                if (drainPending) {
+                if (drainPending && !is_twin) {
                     if (pc[tid]->microPC() == 0 && interrupt == NoFault &&
                         !thread[tid]->trapPending) {
                         // Last architectually committed instruction.
@@ -1056,9 +1273,10 @@ Commit::commitInsts()
                     }
                 }
 
-                bool onInstBoundary = !head_inst->isMicroop() ||
-                                      head_inst->isLastMicroop() ||
-                                      !head_inst->isDelayedCommit();
+                bool onInstBoundary = !is_twin &&
+                                      (!head_inst->isMicroop() ||
+                                       head_inst->isLastMicroop() ||
+                                       !head_inst->isDelayedCommit());
 
                 if (onInstBoundary) {
                     int count = 0;
@@ -1346,6 +1564,7 @@ Commit::markCompletedInsts()
 
             // Mark the instruction as ready to commit.
             fromIEW->insts[inst_num]->setCanCommit();
+            fromIEW->insts[inst_num]->shaftCompleteCycle = cpu->curCycle();
         }
     }
 }

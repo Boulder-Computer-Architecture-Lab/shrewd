@@ -44,11 +44,14 @@
 #include <unistd.h>
 #include <zlib.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cstdio>
+#include <cstring>
 #include <iostream>
 #include <string>
+#include <vector>
 
 #include "base/intmath.hh"
 #include "base/trace.hh"
@@ -462,14 +465,21 @@ PhysicalMemory::unserializeStore(CheckpointIn &cp)
         fatal("Memory range size has changed! Saw %lld, expected %lld\n",
               range_size, range.size());
 
+    // The backing store is freshly mapped and reads as zeros, so only
+    // non-zero chunks are copied: writing the zeros too would touch, and
+    // allocate host memory for, every page of a mostly empty memory.
+    std::vector<uint8_t> chunk(chunk_size);
     uint64_t curr_size = 0;
-    uint32_t bytes_read;
+    int bytes_read;
     while (curr_size < range.size()) {
-        bytes_read = gzread(compressed_mem, pmem, chunk_size);
-        if (bytes_read == 0)
+        bytes_read = gzread(compressed_mem, chunk.data(), chunk_size);
+        if (bytes_read <= 0)
             break;
+        if (std::any_of(chunk.begin(), chunk.begin() + bytes_read,
+                        [](uint8_t byte) { return byte != 0; })) {
+            std::memcpy(pmem + curr_size, chunk.data(), bytes_read);
+        }
         curr_size += bytes_read;
-        pmem += bytes_read;
     }
 
     if (gzclose(compressed_mem))

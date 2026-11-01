@@ -112,6 +112,11 @@ CPU::CPU(const BaseO3CPUParams &params)
                   params.activity),
 
       globalSeqNum(1),
+      shrewdDefaultOn(params.shrewdDefaultOn),
+      seconNoCountMode(params.seconNoCountMode),
+      shaftArchMiscReg(params.shaftArchMiscReg),
+      seqStride(params.enableShrewd &&
+                params.shaftMechanism == ShaftMechanism::Die ? 2 : 1),
       system(params.system),
       lastRunningCycle(curCycle()),
       cpuStats(this)
@@ -319,8 +324,8 @@ CPU::CPU(const BaseO3CPUParams &params)
             thread[tid]->protectionFlag = true;
             thread[tid]->committedProtectionFlag = true;
 
-            // Hardcoded to MISCREG_PROTECTION
-            isa[tid]->setMiscRegNoEffect(193, 1);
+            if (shaftArchMiscReg >= 0)
+                isa[tid]->setMiscRegNoEffect(shaftArchMiscReg, 1);
         }
     }
 
@@ -898,9 +903,35 @@ CPU::switchOut()
 }
 
 void
+CPU::syncShaftModeFromArch(ThreadID tid)
+{
+    // Default-on protects everything, markers or not.
+    if (shrewdDefaultOn) {
+        thread[tid]->protectionFlag = true;
+        thread[tid]->committedProtectionFlag = true;
+        return;
+    }
+    if (shaftArchMiscReg < 0)
+        return;
+
+    const bool in_region = readMiscRegNoEffect(shaftArchMiscReg, tid) != 0;
+    if (seconNoCountMode) {
+        thread[tid]->noCommitCountFlag = in_region;
+        thread[tid]->committedNoCommitCountFlag = in_region;
+    } else {
+        thread[tid]->protectionFlag = in_region;
+        thread[tid]->committedProtectionFlag = in_region;
+    }
+}
+
+void
 CPU::takeOverFrom(BaseCPU *oldCPU)
 {
     BaseCPU::takeOverFrom(oldCPU);
+
+    // The thread contexts now hold the old CPU's architectural state.
+    for (ThreadID tid = 0; tid < numThreads; ++tid)
+        syncShaftModeFromArch(tid);
 
     fetch.takeOverFrom();
     decode.takeOverFrom();

@@ -11,6 +11,8 @@ Usage (invoked by gem5.opt):
         [--benchmark-args ...] [--stdin <file>]
 """
 import argparse
+import json
+from pathlib import Path
 
 from m5.stats import dump, reset
 
@@ -55,6 +57,33 @@ parser.add_argument("--shrewd-default-on", action="store_true",
                     help="Start with protection ON (100%% HW duplication, no secon needed)")
 parser.add_argument("--secon-no-count", action="store_true",
                     help="Enable seconNoCountMode: secon/secoff toggle a no-count region")
+parser.add_argument("--mechanism", default="FuDup",
+                    choices=["FuDup", "Die", "Diva"],
+                    help="How protected instructions are checked")
+parser.add_argument("--diva-policy", default="Marked",
+                    choices=["Marked", "Kernel", "All"],
+                    help="Which instructions the Diva checker verifies")
+parser.add_argument("--diva-width", type=int, default=2,
+                    help="Diva checks started per cycle")
+parser.add_argument("--diva-latency", type=int, default=4,
+                    help="Cycles from completion until a Diva check is done")
+parser.add_argument("--shadow-policy", default="SpatialWait",
+                    choices=["Opportunistic", "SpatialWait", "Temporal", "Hybrid"],
+                    help="What a protected inst does when no partner FU is free")
+parser.add_argument("--shadow-compare-latency", type=int, default=0,
+                    help="Cycles to compare primary and shadow results")
+parser.add_argument("--stuck-fu", default=None, metavar="CLASS[:N]",
+                    help="Permanent fault: the N-th unit (default 0) with op "
+                         "class CLASS (e.g. FloatAdd) corrupts its results")
+parser.add_argument("--markers-only", action="store_true",
+                    help="Execute secon/secoff (dropped at rename) but check "
+                         "nothing: the cost of the markers alone")
+parser.add_argument("--legacy-shadow", action="store_true",
+                    help="Original model: Opportunistic shadows that take no "
+                         "issue slot and no compare latency")
+parser.add_argument("--checkpoint", default=None,
+                    help="Restore this SimPoint checkpoint (make_checkpoints.py) "
+                         "instead of fast-forwarding from the program start")
 args, benchmark_args = parser.parse_known_args()
 
 if benchmark_args and benchmark_args[0] == "--benchmark-args":
@@ -65,6 +94,15 @@ requires(isa_required=ISA.RISCV)
 INTERVAL_SIZE = args.interval_size
 SIMPOINT_INTERVAL = args.simpoint_interval
 FAST_FORWARD_INSTS = SIMPOINT_INTERVAL * INTERVAL_SIZE
+if args.checkpoint:
+    # The checkpoint sits warmup_insts before the interval; the ATOMIC core
+    # runs those (warming the caches) and then the usual switch happens.
+    meta = json.loads((Path(args.checkpoint) / "shaft_meta.json").read_text())
+    if (meta["interval"] != SIMPOINT_INTERVAL or
+            meta["interval_size"] != INTERVAL_SIZE):
+        raise SystemExit(f"Checkpoint {args.checkpoint} is for interval "
+                         f"{meta['interval']} (size {meta['interval_size']})")
+    FAST_FORWARD_INSTS = meta["warmup_insts"]
 
 # ---------------------------------------------------------------------------
 # Components — caches are present from the start; ATOMIC mode bypasses their
@@ -102,6 +140,7 @@ board.set_se_binary_workload(
     binary=binary_resource,
     arguments=benchmark_args,
     stdin_file=stdin_file,
+    checkpoint=Path(args.checkpoint) if args.checkpoint else None,
 )
 
 # ---------------------------------------------------------------------------
@@ -110,7 +149,20 @@ board.set_se_binary_workload(
 # instruction counting during fast-forward matches the O3 core's mode,
 # ensuring all variants reach the same SimPoint tick.
 # ---------------------------------------------------------------------------
-if args.no_shrewd:
+# Per-PC committed/protected/checked counts for the measured interval
+# (<cpu>.shaft_pcs.csv), used to estimate the run's SDC coverage.
+for core in processor._switchable_cores["switch"]:
+    core.core.shaftCommitLog = True
+    if args.stuck_fu:
+        op_class, _, n = args.stuck_fu.partition(":")
+        core.core.stuckFuOpClass = op_class
+        core.core.stuckFuInstance = int(n or 0)
+
+if args.markers_only:
+    for core in processor._switchable_cores["switch"]:
+        core.core.enableShrewd = False
+        core.core.priorityToShadow = False
+elif args.no_shrewd:
     for core in processor._switchable_cores["switch"]:
         core.core.seconNoCountMode = True
         core.core.enableShrewd = False
@@ -122,7 +174,18 @@ else:
     for core in processor._switchable_cores["switch"]:
         core.core.seconNoCountMode = bool(args.secon_no_count)
         core.core.enableShrewd = True
+        core.core.shaftMechanism = args.mechanism
+        core.core.divaPolicy = args.diva_policy
+        core.core.divaWidth = args.diva_width
+        core.core.divaLatency = args.diva_latency
         core.core.priorityToShadow = True
+        if args.legacy_shadow:
+            core.core.shadowPolicy = "Opportunistic"
+            core.core.shadowUsesIssueSlot = False
+            core.core.shadowCompareLatency = 0
+        else:
+            core.core.shadowPolicy = args.shadow_policy
+            core.core.shadowCompareLatency = args.shadow_compare_latency
         if args.shrewd_default_on:
             core.core.shrewdDefaultOn = True
     for core in processor._switchable_cores["start"]:

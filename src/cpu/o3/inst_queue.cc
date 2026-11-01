@@ -95,12 +95,25 @@ InstructionQueue::InstructionQueue(CPU *cpu_ptr, IEW *iew_ptr,
       numEntries(params.numIQEntries),
       totalWidth(params.issueWidth),
       commitToIEWDelay(params.commitToIEWDelay),
-      enableShrewd(params.enableShrewd),
+      // Shadow FUs belong to the FuDup mechanism only.
+      enableShrewd(params.enableShrewd &&
+                   params.shaftMechanism == ShaftMechanism::FuDup),
       priorityToShadow(params.priorityToShadow),
+      shadowPolicy(params.shadowPolicy),
+      shadowUsesIssueSlot(params.shadowUsesIssueSlot),
+      shadowCompareLatency(params.shadowCompareLatency),
       iqStats(cpu, totalWidth),
       iqIOStats(cpu)
 {
     assert(fuPool);
+
+    if (params.stuckFuOpClass != No_OpClass) {
+        stuckFu = fuPool->unitWith(params.stuckFuOpClass,
+                                   params.stuckFuInstance);
+        fatal_if(stuckFu < 0, "No unit %d with op class %s to make stuck.\n",
+                 params.stuckFuInstance,
+                 enums::OpClassStrings[params.stuckFuOpClass]);
+    }
 
     const auto &reg_classes = params.isa[0]->regClasses();
     // Set the number of total physical registers
@@ -405,7 +418,19 @@ InstructionQueue::IQIOStats::IQIOStats(statistics::Group *parent)
     ADD_STAT(ShadowIsSameFU, statistics::units::Count::get(),
              "Did shadow acquire the same FU."),
     ADD_STAT(ShadowIsNotSameFU, statistics::units::Count::get(),
-             "Did shadow not acquire the same FU.")
+             "Did shadow not acquire the same FU."),
+    ADD_STAT(shadowTemporal, statistics::units::Count::get(),
+             "Protected insts re-run on the same FU (Temporal, Hybrid)"),
+    ADD_STAT(shadowWaits, statistics::units::Count::get(),
+             "Issue attempts a protected inst waited for a partner FU or "
+             "issue slot (SpatialWait policy)"),
+    ADD_STAT(protectedNotDuplicable, statistics::units::Count::get(),
+             "Protected insts issued with no shadow-capable FU class "
+             "(memory, SIMD, no-FU)"),
+    ADD_STAT(stuckFuResults, statistics::units::Count::get(),
+             "Results (primary, shadow or twin) computed on the stuck unit"),
+    ADD_STAT(stuckFuRetireCycle, statistics::units::Cycle::get(),
+             "Cycle the stuck unit was taken out of service (0: never)")
 {
     using namespace statistics;
     intInstQueueReads
@@ -779,7 +804,9 @@ InstructionQueue::moveToYoungerInst(ListOrderIt list_order_it)
 void
 InstructionQueue::processFUCompletion(const DynInstPtr &inst, int fu_idx)
 {
-    DPRINTF(IQ, "Processing FU completion [sn:%llu]\n", inst->seqNum);
+    // inst is NULL for completions that only free a (shadow) unit.
+    DPRINTF(IQ, "Processing FU completion [sn:%llu]\n",
+            inst ? inst->seqNum : 0);
     assert(!cpu->switchedOut());
     // The CPU could have been sleeping until this op completed (*extremely*
     // long latency op).  Wake it if it was.  This may be overkill.        
@@ -896,29 +923,73 @@ InstructionQueue::scheduleReadyInsts()
 
         int idx_shadow = FUPool::NoNeedFU;
         bool has_shadow = false;
+        bool temporal_shadow = false;
         OpClass shadow_op_class = op_class;
-        if(enableShrewd && priorityToShadow && issuing_inst->protected_){
-        // Ask for shadow unit to check the result.
-        requestShadow(idx, idx_shadow, op_class, shadow_op_class, has_shadow, op_latency);
-        //if (has_shadow)
-          //  ++total_issued;
+        const bool check_here = enableShrewd && priorityToShadow &&
+                                issuing_inst->protected_;
+        const bool duplicable = FUPool::hasShadowCapability(op_class);
+        if (check_here && duplicable && idx >= 0 &&
+                shadowPolicy == ShadowPolicy::Temporal) {
+            // Re-run on the same unit after the primary: no second unit.
+            has_shadow = true;
+            temporal_shadow = true;
+        } else if (check_here && duplicable && idx >= 0) {
+            // A spatial shadow needs a second issue slot this cycle.
+            const bool slot_free = !shadowUsesIssueSlot ||
+                                   total_issued + 1 < totalWidth;
+            if (slot_free) {
+                // Ask for shadow unit to check the result.
+                requestShadow(idx, idx_shadow, op_class, shadow_op_class,
+                              has_shadow, op_latency);
+            }
+            if (!has_shadow) {
+                switch (shadowPolicy) {
+                  case ShadowPolicy::SpatialWait:
+                    // Give the unit back and retry next cycle, so a
+                    // protected instruction never issues unchecked.
+                    fuPool->releaseUnit(idx);
+                    idx = FUPool::NoFreeFU;
+                    ++iqIOStats.shadowWaits;
+                    break;
+                  case ShadowPolicy::Hybrid:
+                    // Re-run on the same unit after the primary.
+                    has_shadow = true;
+                    temporal_shadow = true;
+                    break;
+                  case ShadowPolicy::Opportunistic:
+                    // Issues unchecked (original behaviour).
+                    break;
+                  default:
+                    panic("Unknown shadow policy %d.\n",
+                          static_cast<int>(shadowPolicy));
+                }
+            }
         }
+
         // If we have an instruction that doesn't require a FU, or a
         // valid FU, then schedule for execution.
         if (idx > FUPool::NoFreeFU || idx == FUPool::NoNeedFU || idx == FUPool::NoCapableFU) {
-            if (op_latency == Cycles(1)) {
+            if (stuckFu >= 0) {
+                // The stuck unit corrupts whatever it computes; a temporal
+                // shadow reruns on the primary's unit.
+                const int shadow_unit = temporal_shadow ? idx : idx_shadow;
+                issuing_inst->faultInjected_ = idx == stuckFu;
+                issuing_inst->shadowFaulty_ =
+                    has_shadow && shadow_unit == stuckFu;
+                iqIOStats.stuckFuResults += (idx == stuckFu) +
+                    issuing_inst->shadowFaulty_;
+            }
+            if (has_shadow) {
+                issueWithShadow(issuing_inst, op_class, idx, shadow_op_class,
+                                idx_shadow, temporal_shadow, op_latency);
+            } else if (op_latency == Cycles(1)) {
                 i2e_info->size++;
                 instsToExecute.push_back(issuing_inst);
 
                 // Add the FU onto the list of FU's to be freed next
                 // cycle if we used one.
                 if (idx >= 0)
-                {
                     fuPool->freeUnitNextCycle(idx);
-
-                    if (has_shadow)
-                        fuPool->freeUnitNextCycle(idx_shadow);
-                }
 
                 // CPU has no capable FU for the instruction
                 // but this may be OK if the instruction gets
@@ -945,24 +1016,20 @@ InstructionQueue::scheduleReadyInsts()
                     // Add the FU onto the list of FU's to be freed next cycle.
                     fuPool->freeUnitNextCycle(idx);
                 }
+            }
 
-                if (has_shadow)
-                {
-                    ++wbOutstanding;
-                    bool shadow_pipelined = fuPool->isPipelined(shadow_op_class);
-                    FUCompletion *execution_shadow = new FUCompletion(NULL, idx_shadow, this);
-
-                    cpu->schedule(execution_shadow, cpu->clockEdge(Cycles(op_latency - 1)));
-
-                    if (!shadow_pipelined) {
-                        // If FU isn't pipelined, then it must be freed
-                        // upon the execution completing.
-                        execution_shadow->setFreeFU();
-                    } else {
-                        // Add the FU onto the list of FU's to be freed next cycle.
-                        fuPool->freeUnitNextCycle(idx_shadow);
-                    }
+            if (check_here) {
+                if (duplicable) {
+                    recordShadowIssue(op_class, shadow_op_class, has_shadow,
+                                      temporal_shadow);
+                } else {
+                    ++iqIOStats.protectedNotDuplicable;
                 }
+            }
+            if (has_shadow) {
+                issuing_inst->hasShadow_ = true;
+                if (shadowUsesIssueSlot)
+                    ++total_issued;
             }
 
             // Track issued instructions for delayed shadow processing, only ones protected are added
@@ -974,6 +1041,9 @@ InstructionQueue::scheduleReadyInsts()
                 info.op_latency = op_latency;
                 info.tid = tid;
                 issued_inst_protected.push_back(info);
+
+                // hasShadow_ for non-priority path will be set after
+                // delayed shadow processing below.
             }
 
             DPRINTF(IQ, "Thread %i: Issuing instruction PC %s "
@@ -1010,10 +1080,13 @@ InstructionQueue::scheduleReadyInsts()
 
             if (!issuing_inst->isMemRef()) {
                 // Memory instructions can not be freed from the IQ until they
-                // complete.
-                ++freeEntries;
-                count[tid]--;
-                issuing_inst->clearInIQ();
+                // complete. A replayed instruction (rescheduleInst) holds no
+                // entry.
+                if (issuing_inst->isInIQ()) {
+                    ++freeEntries;
+                    count[tid]--;
+                    issuing_inst->clearInIQ();
+                }
             } else {
                 memDepUnit[tid].issue(issuing_inst);
             }
@@ -1038,8 +1111,17 @@ InstructionQueue::scheduleReadyInsts()
             
             // Request shadow for this issued instruction
             requestShadow(info.idx, idx_shadow, info.op_class, shadow_op_class, has_shadow, shadow_op_latency);
-            
+            if (FUPool::hasShadowCapability(info.op_class)) {
+                recordShadowIssue(info.op_class, shadow_op_class, has_shadow,
+                                  false);
+            } else {
+                ++iqIOStats.protectedNotDuplicable;
+            }
+
             if (has_shadow) {
+                // Record shadow availability on the instruction.
+                info.inst->hasShadow_ = true;
+
                 // Schedule the shadow execution
                 if (shadow_op_latency == Cycles(1)) {
                     // Single-cycle shadow operation - only free if valid FU index
@@ -1081,106 +1163,170 @@ InstructionQueue::scheduleReadyInsts()
     }
 }
 
-void InstructionQueue::requestShadow(int idx, int &idx_shadow, gem5::enums::OpClass op_class, gem5::enums::OpClass &shadow_op_class, bool &has_shadow, gem5::Cycles &op_latency)
+void
+InstructionQueue::requestShadow(int idx, int &idx_shadow, OpClass op_class,
+                                OpClass &shadow_op_class, bool &has_shadow,
+                                Cycles &op_latency)
 {
-    if (idx != FUPool::NoFreeFU && idx != FUPool::NoCapableFU)
-    {
-        idx_shadow = fuPool->getUnit(op_class, true, shadow_op_class);
+    // Only an instruction that got a unit of its own can be checked.
+    if (idx < 0)
+        return;
 
-        if (idx_shadow != FUPool::NoShadowFU && idx != FUPool::NoCapableFU)
-        {
-            if (idx_shadow != FUPool::NoFreeFU)
-            {
-                has_shadow = true;
-                iqIOStats.shadowAvailable++;
+    idx_shadow = fuPool->getUnit(op_class, true, shadow_op_class);
+    if (idx_shadow < 0)
+        return;
 
-                // TODO Change when we have a buffer.
-                op_latency = std::max(op_latency, fuPool->getOpLatency(shadow_op_class));
+    has_shadow = true;
+    // TODO Change when we have a buffer.
+    op_latency = std::max(op_latency, fuPool->getOpLatency(shadow_op_class));
+}
 
-                if (op_class == shadow_op_class)
-                    iqIOStats.ShadowIsSameFU++;
-                else
-                    iqIOStats.ShadowIsNotSameFU++;
-            }
-            else
-            {
-                iqIOStats.shadowNotAvailable++;
-            }
+void
+InstructionQueue::recordShadowIssue(OpClass op_class, OpClass shadow_op_class,
+                                    bool has_shadow, bool temporal)
+{
+    // shadowAvailable counts spatial shadows, shadowTemporal re-runs on the
+    // same unit, shadowNotAvailable protected insts that issued unchecked.
+    const bool spatial = has_shadow && !temporal;
+    if (spatial) {
+        iqIOStats.shadowAvailable++;
+        if (op_class == shadow_op_class)
+            iqIOStats.ShadowIsSameFU++;
+        else
+            iqIOStats.ShadowIsNotSameFU++;
+    } else if (temporal) {
+        iqIOStats.shadowTemporal++;
+    } else {
+        iqIOStats.shadowNotAvailable++;
+    }
 
-            switch (op_class)
-            {
-            case OpClass::IntAlu:
-                if (has_shadow)
-                    iqIOStats.IntAluShadowAvailable++;
-                else
-                    iqIOStats.IntAluShadowNotAvailable++;
-                break;
-            case OpClass::IntMult:
-                if (has_shadow)
-                    iqIOStats.IntMultShadowAvailable++;
-                else
-                    iqIOStats.IntMultShadowNotAvailable++;
-                break;
-            case OpClass::IntDiv:
-                if (has_shadow)
-                    iqIOStats.IntDivShadowAvailable++;
-                else
-                    iqIOStats.IntDivShadowNotAvailable++;
-                break;
-            case OpClass::FloatAdd:
-                if (has_shadow)
-                    iqIOStats.FloatAddShadowAvailable++;
-                else
-                    iqIOStats.FloatAddShadowNotAvailable++;
-                break;
-            case OpClass::FloatMult:
-                if (has_shadow)
-                    iqIOStats.FloatMultShadowAvailable++;
-                else
-                    iqIOStats.FloatMultShadowNotAvailable++;
-                break;
-            case OpClass::FloatDiv:
-                if (has_shadow)
-                    iqIOStats.FloatDivShadowAvailable++;
-                else
-                    iqIOStats.FloatDivShadowNotAvailable++;
-                break;
-            case OpClass::FloatSqrt:
-                if (has_shadow)
-                    iqIOStats.FloatSqrtShadowAvailable++;
-                else
-                    iqIOStats.FloatSqrtShadowNotAvailable++;
-                break;
-            case OpClass::FloatMultAcc:
-                if (has_shadow)
-                    iqIOStats.FloatMultAccShadowAvailable++;
-                else
-                    iqIOStats.FloatMultAccShadowNotAvailable++;
-                break;
-            case OpClass::FloatCvt:
-                if (has_shadow)
-                    iqIOStats.FloatCvtShadowAvailable++;
-                else
-                    iqIOStats.FloatCvtShadowNotAvailable++;
-                break;
-            case OpClass::FloatCmp:
-                if (has_shadow)
-                    iqIOStats.FloatCmpShadowAvailable++;
-                else
-                    iqIOStats.FloatCmpShadowNotAvailable++;
-                break;
-            case OpClass::FloatMisc:
-                if (has_shadow)
-                    iqIOStats.FloatMiscShadowAvailable++;
-                else
-                    iqIOStats.FloatMiscShadowNotAvailable++;
-                break;
-            default:
-                break;
-            }
-        }
+    // Per class: Available = spatial shadow, NotAvailable = anything else.
+    switch (op_class) {
+      case OpClass::IntAlu:
+        if (spatial)
+            iqIOStats.IntAluShadowAvailable++;
+        else
+            iqIOStats.IntAluShadowNotAvailable++;
+        break;
+      case OpClass::IntMult:
+        if (spatial)
+            iqIOStats.IntMultShadowAvailable++;
+        else
+            iqIOStats.IntMultShadowNotAvailable++;
+        break;
+      case OpClass::IntDiv:
+        if (spatial)
+            iqIOStats.IntDivShadowAvailable++;
+        else
+            iqIOStats.IntDivShadowNotAvailable++;
+        break;
+      case OpClass::FloatAdd:
+        if (spatial)
+            iqIOStats.FloatAddShadowAvailable++;
+        else
+            iqIOStats.FloatAddShadowNotAvailable++;
+        break;
+      case OpClass::FloatMult:
+        if (spatial)
+            iqIOStats.FloatMultShadowAvailable++;
+        else
+            iqIOStats.FloatMultShadowNotAvailable++;
+        break;
+      case OpClass::FloatDiv:
+        if (spatial)
+            iqIOStats.FloatDivShadowAvailable++;
+        else
+            iqIOStats.FloatDivShadowNotAvailable++;
+        break;
+      case OpClass::FloatSqrt:
+        if (spatial)
+            iqIOStats.FloatSqrtShadowAvailable++;
+        else
+            iqIOStats.FloatSqrtShadowNotAvailable++;
+        break;
+      case OpClass::FloatMultAcc:
+        if (spatial)
+            iqIOStats.FloatMultAccShadowAvailable++;
+        else
+            iqIOStats.FloatMultAccShadowNotAvailable++;
+        break;
+      case OpClass::FloatCvt:
+        if (spatial)
+            iqIOStats.FloatCvtShadowAvailable++;
+        else
+            iqIOStats.FloatCvtShadowNotAvailable++;
+        break;
+      case OpClass::FloatCmp:
+        if (spatial)
+            iqIOStats.FloatCmpShadowAvailable++;
+        else
+            iqIOStats.FloatCmpShadowNotAvailable++;
+        break;
+      case OpClass::FloatMisc:
+        if (spatial)
+            iqIOStats.FloatMiscShadowAvailable++;
+        else
+            iqIOStats.FloatMiscShadowNotAvailable++;
+        break;
+      default:
+        break;
     }
 }
+
+void
+InstructionQueue::issueWithShadow(const DynInstPtr &inst, OpClass op_class,
+                                  int idx, OpClass shadow_op_class,
+                                  int idx_shadow, bool temporal,
+                                  Cycles op_latency)
+{
+    assert(idx >= 0);
+
+    // Frees a unit once it has been busy for the given number of cycles.
+    auto free_unit_after = [this](int fu_idx, Cycles busy) {
+        if (busy == Cycles(1)) {
+            fuPool->freeUnitNextCycle(fu_idx);
+        } else {
+            ++wbOutstanding;
+            FUCompletion *release = new FUCompletion(NULL, fu_idx, this);
+            release->setFreeFU();
+            cpu->schedule(release, cpu->clockEdge(Cycles(busy - 1)));
+        }
+    };
+
+    // A temporal shadow runs on the same unit right after the primary: one
+    // more issue cycle if the unit is pipelined, a second full execution if
+    // it is not.
+    const bool pipelined = fuPool->isPipelined(op_class);
+    Cycles unit_busy = pipelined ? Cycles(1) : op_latency;
+    Cycles result_latency = op_latency;
+    if (temporal) {
+        unit_busy = pipelined ? Cycles(2) : Cycles(op_latency << 1);
+        result_latency = pipelined ? Cycles(op_latency + Cycles(1)) :
+                                     Cycles(op_latency << 1);
+    }
+    // The result is broadcast only after the two copies are compared.
+    result_latency += shadowCompareLatency;
+
+    free_unit_after(idx, unit_busy);
+    if (!temporal) {
+        assert(idx_shadow >= 0);
+        free_unit_after(idx_shadow,
+                        fuPool->isPipelined(shadow_op_class) ?
+                            Cycles(1) :
+                            fuPool->getOpLatency(shadow_op_class));
+    }
+
+    if (result_latency == Cycles(1)) {
+        issueToExecuteQueue->access(0)->size++;
+        instsToExecute.push_back(inst);
+    } else {
+        // Units are freed above, so this completion does not free one.
+        ++wbOutstanding;
+        FUCompletion *execution = new FUCompletion(inst, idx, this);
+        cpu->schedule(execution, cpu->clockEdge(Cycles(result_latency - 1)));
+    }
+}
+
 void InstructionQueue::scheduleNonSpec(const InstSeqNum &inst)
 {
     DPRINTF(IQ, "Marking nonspeculative instruction [sn:%llu] as ready "
@@ -1345,6 +1491,34 @@ InstructionQueue::addReadyMemInst(const DynInstPtr &ready_inst)
     DPRINTF(IQ, "Instruction is ready to issue, putting it onto "
             "the ready list, PC %s opclass:%i [sn:%llu].\n",
             ready_inst->pcState(), op_class, ready_inst->seqNum);
+}
+
+void
+InstructionQueue::retireStuckFu()
+{
+    if (stuckFu < 0 || stuckFuRetired)
+        return;
+    fuPool->disableUnit(stuckFu);
+    stuckFuRetired = true;
+    iqIOStats.stuckFuRetireCycle = cpu->curCycle();
+}
+
+void
+InstructionQueue::rescheduleInst(const DynInstPtr &resched_inst)
+{
+    DPRINTF(IQ, "Rescheduling inst [sn:%llu] for re-issue\n",
+            resched_inst->seqNum);
+
+    // The re-execution is replayed from beside the FUs: the instruction
+    // goes back on the ready list without taking an IQ entry (its entry was
+    // freed at issue), so a full IQ cannot be overcommitted. Issue and
+    // squash only release entries of instructions still in the IQ.
+    assert(!resched_inst->isInIQ());
+
+    resched_inst->clearIssued();
+    resched_inst->clearExecuted();
+    resched_inst->setCanIssue();
+    addIfReady(resched_inst);
 }
 
 void
@@ -1552,6 +1726,9 @@ InstructionQueue::doSquash(ThreadID tid)
 
             // Might want to also clear out the head of the dependency graph.
 
+            // A replayed instruction (rescheduleInst) holds no entry.
+            const bool held_entry = squashed_inst->isInIQ();
+
             // Mark it as squashed within the IQ.
             squashed_inst->setSquashedInIQ();
 
@@ -1561,10 +1738,12 @@ InstructionQueue::doSquash(ThreadID tid)
             squashed_inst->setCanCommit();
             squashed_inst->clearInIQ();
 
-            //Update Thread IQ Count
-            count[squashed_inst->threadNumber]--;
+            if (held_entry) {
+                //Update Thread IQ Count
+                count[squashed_inst->threadNumber]--;
 
-            ++freeEntries;
+                ++freeEntries;
+            }
         }
 
         // IQ clears out the heads of the dependency graph only when

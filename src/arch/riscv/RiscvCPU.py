@@ -55,6 +55,8 @@ class RiscvTimingSimpleCPU(BaseTimingSimpleCPU, RiscvCPU):
 
 class RiscvO3CPU(BaseO3CPU, RiscvCPU):
     mmu = RiscvMMU()
+    # RiscvISA::MISCREG_PROTECTION (static_assert in arch/riscv/isa.cc).
+    shaftArchMiscReg = 193
 
 
 class RiscvMinorCPU(BaseMinorCPU, RiscvCPU):

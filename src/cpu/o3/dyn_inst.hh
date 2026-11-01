@@ -342,6 +342,40 @@ class DynInst : public ExecContext, public RefCounted
     // Fault injection tag for this dynamic instruction
     bool faultInjected_ = false;
 
+    // Whether a shadow FU was used for this instruction
+    bool hasShadow_ = false;
+
+    // The shadow's result is faulty too (it ran on a stuck unit)
+    bool shadowFaulty_ = false;
+
+    /** The primary and shadow executions of a protected instruction
+     * disagree: an injected fault that exactly one of them saw. */
+    bool
+    shadowMismatch() const
+    {
+        return protected_ && hasShadow_ && faultInjected_ != shadowFaulty_;
+    }
+
+    // DIE mechanism: the redundant twin of this protected instruction
+    // (seqNum + 1), and whether this instruction is such a twin.
+    DynInstPtr shaftTwin;
+    bool isShaftTwin_ = false;
+
+    // Cycle the instruction completed (commit saw it written back).
+    Cycles shaftCompleteCycle = Cycles(0);
+
+    // Diva mechanism: verified by the checker, and when that is done.
+    bool divaChecked_ = false;
+    Cycles divaDoneCycle = Cycles(0);
+
+    /** Whether a protection mechanism actually checked this instruction. */
+    bool
+    shaftChecked() const
+    {
+        return hasShadow_ || divaChecked_ ||
+            (shaftTwin && !shaftTwin->isSquashed());
+    }
+
     // Snapshot of injector state at this instruction
     bool faultInjectActive_ = false;
     uint64_t faultInjectCount_ = 0;
@@ -791,6 +825,9 @@ class DynInst : public ExecContext, public RefCounted
 
     /** Returns whether or not this instruction has executed. */
     bool isExecuted() const { return status[Executed]; }
+
+    /** Clears this instruction as being executed. */
+    void clearExecuted() { status.reset(Executed); }
 
     /** Sets this instruction as ready to commit. */
     void setCanCommit() { status.set(CanCommit); }

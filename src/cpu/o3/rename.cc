@@ -41,11 +41,13 @@
 
 #include "cpu/o3/rename.hh"
 
+#include <iterator>
 #include <list>
 
 #include "cpu/o3/cpu.hh"
 #include "cpu/o3/dyn_inst.hh"
 #include "cpu/o3/limits.hh"
+#include "cpu/o3/shaft_twin.hh"
 #include "cpu/reg_class.hh"
 #include "debug/Activity.hh"
 #include "debug/O3PipeView.hh"
@@ -67,6 +69,8 @@ Rename::Rename(CPU *_cpu, const BaseO3CPUParams &params)
             seconNoCountMode(params.seconNoCountMode),
         shrewdDefaultOn(params.shrewdDefaultOn),
             faultInjectionWindow(params.faultInjectionWindow),
+      makeShaftTwins(params.enableShrewd &&
+                     params.shaftMechanism == ShaftMechanism::Die),
             rng(Random::genRandom()),
       numThreads(params.numThreads),
       stats(_cpu)
@@ -114,6 +118,8 @@ Rename::RenameStats::RenameStats(statistics::Group *parent)
                "Number of cycles rename is unblocking"),
       ADD_STAT(renamedInsts, statistics::units::Count::get(),
                "Number of instructions processed by rename"),
+      ADD_STAT(faultsMarked, statistics::units::Count::get(),
+               "Instructions the fault injector marked (incl. wrong path)"),
       ADD_STAT(squashedInsts, statistics::units::Count::get(),
                "Number of squashed instructions processed by rename"),
       ADD_STAT(ROBFullEvents, statistics::units::Count::get(),
@@ -560,6 +566,9 @@ Rename::renameInsts(ThreadID tid)
         source = IQ;
     }
 
+    // ROB/IQ entries left this cycle; a DIE twin takes a second one.
+    int free_entries = min_free_entries;
+
     // Check if there's any space left.
     if (min_free_entries <= 0) {
         DPRINTF(Rename,
@@ -575,23 +584,34 @@ Rename::renameInsts(ThreadID tid)
         incrFullStat(source);
 
         return;
-    } else if (min_free_entries < insts_available) {
+    }
+
+    InstQueue &insts_to_rename = renameStatus[tid] == Unblocking ?
+        skidBuffer[tid] : insts[tid];
+
+    // Markers are dropped here and take no ROB/IQ entry, so only the
+    // instructions among them count against the free entries.
+    int fits = 0;
+    for (int real = 0; fits < insts_available; ++fits) {
+        if (!isShaftMarker(insts_to_rename[fits]->staticInst) &&
+                ++real > min_free_entries) {
+            break;
+        }
+    }
+    if (fits < insts_available) {
         DPRINTF(Rename,
                 "[tid:%i] "
                 "Will have to block this cycle. "
                 "%i insts available, "
                 "but only %i insts can be renamed due to ROB/IQ/LSQ limits.\n",
-                tid, insts_available, min_free_entries);
+                tid, insts_available, fits);
 
-        insts_available = min_free_entries;
+        insts_available = fits;
 
         blockThisCycle = true;
 
         incrFullStat(source);
     }
-
-    InstQueue &insts_to_rename = renameStatus[tid] == Unblocking ?
-        skidBuffer[tid] : insts[tid];
 
     DPRINTF(Rename,
             "[tid:%i] "
@@ -646,6 +666,22 @@ Rename::renameInsts(ThreadID tid)
                 incrFullStat(source);
                 break;
             }
+        }
+
+        // DIE: a protected instruction leaves together with its twin, which
+        // needs a second ROB/IQ entry and rename slot. Markers are not
+        // eligible, so the mode in force is the instruction's own.
+        const bool make_twin = makeShaftTwins &&
+            (cpu->thread[tid]->protectionFlag || shrewdDefaultOn) &&
+            shaftTwinEligible(inst->staticInst);
+        const int entries_needed = isShaftMarker(inst->staticInst) ? 0 :
+            make_twin ? 2 : 1;
+        if (make_twin && toIEWIndex + 1 >= renameWidth)
+            break;
+        if (free_entries < entries_needed) {
+            blockThisCycle = true;
+            incrFullStat(source);
+            break;
         }
 
         insts_to_rename.pop_front();
@@ -765,6 +801,7 @@ Rename::renameInsts(ThreadID tid)
                 if (cpu->thread[tid]->faultInjectCount ==
                     cpu->thread[tid]->faultInjectTarget) {
                     inst->faultInjected_ = true;
+                    ++stats.faultsMarked;
                 }
 
                 if (cpu->thread[tid]->faultInjectCount >= faultInjectionWindow) {
@@ -845,6 +882,14 @@ Rename::renameInsts(ThreadID tid)
         // Increment which instruction we're on.
         ++toIEWIndex;
 
+        if (make_twin) {
+            toIEW->insts[toIEWIndex] = createShaftTwin(inst, tid);
+            ++(toIEW->size);
+            ++toIEWIndex;
+            ++renamed_insts;
+        }
+        free_entries -= entries_needed;
+
         // Decrement how many instructions are available.
         --insts_available;
     }
@@ -867,6 +912,47 @@ Rename::renameInsts(ThreadID tid)
         block(tid);
         toDecode->renameUnblock[tid] = false;
     }
+}
+
+DynInstPtr
+Rename::createShaftTwin(const DynInstPtr &inst, ThreadID tid)
+{
+    const StaticInstPtr twin_inst = shaftTwinOf(inst->staticInst);
+
+    DynInst::Arrays arrays;
+    arrays.numSrcs = twin_inst->numSrcRegs();
+    arrays.numDests = 0;
+    // IEW redirects any instruction whose next PC differs from its
+    // prediction, control or not; predicting the twin's own fall-through
+    // keeps a branch's twin from redirecting fetch.
+    std::unique_ptr<PCStateBase> fall_through(inst->pcState().clone());
+    twin_inst->advancePC(*fall_through);
+    DynInstPtr twin = new (arrays) DynInst(arrays, twin_inst, inst->macroop,
+            inst->pcState(), *fall_through, inst->seqNum + 1, cpu);
+    twin->setTid(tid);
+    twin->setThreadState(cpu->thread[tid]);
+    twin->isShaftTwin_ = true;
+    // Not a program instruction: kept out of the instruction counts.
+    twin->noCommitCount_ = true;
+
+    // Same physical sources as the primary, with the readiness rename saw;
+    // the IQ resolves the rest through its dependency graph.
+    for (int i = 0; i < arrays.numSrcs; i++) {
+        twin->renameSrcReg(i, inst->renamedSrcIdx(i));
+        if (inst->readySrcIdx(i))
+            twin->markSrcRegReady(i);
+    }
+    if (arrays.numSrcs == 0)
+        twin->setCanIssue();
+
+    // Keep the CPU's instruction list in sequence-number order.
+    twin->setInstListIt(cpu->instList.insert(
+            std::next(inst->getInstListIt()), twin));
+    inst->shaftTwin = twin;
+
+    DPRINTF(Rename, "[tid:%i] [sn:%llu] DIE twin of [sn:%llu] PC %s\n", tid,
+            twin->seqNum, inst->seqNum, inst->pcState());
+    return twin;
 }
 
 void
@@ -1407,6 +1493,21 @@ Rename::checkSignalsAndUpdate(ThreadID tid)
                 "commit.\n", tid);
 
         squash(fromCommit->commitInfo[tid].doneSeqNum, tid);
+
+        // Restore the SHAFT mode at the restart point. Done here rather
+        // than where the squash was detected, since rename may have
+        // renamed younger (wrong-path) markers in between.
+        const ShaftRestore &restore = fromCommit->commitInfo[tid].shaftRestore;
+        if (restore.valid) {
+            ThreadState *ts = cpu->thread[tid];
+            ts->protectionFlag = shrewdDefaultOn || restore.protectionFlag;
+            ts->noCommitCountFlag = restore.noCommitCountFlag;
+            if (restore.injectorValid) {
+                ts->faultInjectActive = restore.faultInjectActive;
+                ts->faultInjectCount = restore.faultInjectCount;
+                ts->faultInjectTarget = restore.faultInjectTarget;
+            }
+        }
 
         return true;
     } else if (!fromCommit->commitInfo[tid].robSquashing &&

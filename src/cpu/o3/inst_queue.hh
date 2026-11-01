@@ -59,6 +59,7 @@
 #include "cpu/op_class.hh"
 #include "cpu/timebuf.hh"
 #include "enums/SMTQueuePolicy.hh"
+#include "enums/ShadowPolicy.hh"
 #include "sim/eventq.hh"
 
 namespace gem5
@@ -234,6 +235,18 @@ class InstructionQueue
 
     void requestShadow(int idx, int &idx_shadow, gem5::enums::OpClass op_class, gem5::enums::OpClass &shadow_op_class, bool &has_shadow, gem5::Cycles &op_latency);
 
+    /** Counts how a protected instruction was checked when it issued. */
+    void recordShadowIssue(OpClass op_class, OpClass shadow_op_class,
+                           bool has_shadow, bool temporal);
+
+    /**
+     * Schedules the units and the result of a protected instruction that
+     * issued with a shadow (spatial on idx_shadow, or temporal on idx).
+     */
+    void issueWithShadow(const DynInstPtr &inst, OpClass op_class, int idx,
+                         OpClass shadow_op_class, int idx_shadow,
+                         bool temporal, Cycles op_latency);
+
     /** Schedules a single specific non-speculative instruction. */
     void scheduleNonSpec(const InstSeqNum &inst);
 
@@ -254,6 +267,16 @@ class InstructionQueue
      * replayMemInst() is called.
      */
     void rescheduleMemInst(const DynInstPtr &resched_inst);
+
+    /**
+     * Reschedules a non-memory instruction back into the ready list
+     * for re-issue and re-execution.
+     */
+    void rescheduleInst(const DynInstPtr &resched_inst);
+
+    /** Redundant executions disagreed: in the permanent-fault experiment
+     * that diagnoses the stuck unit, which is taken out of service. */
+    void retireStuckFu();
 
     /** Replays a memory instruction. It must be rescheduled first. */
     void replayMemInst(const DynInstPtr &replay_inst);
@@ -434,6 +457,20 @@ class InstructionQueue
     /** Enable priority to shadow functionality */
     bool priorityToShadow;
 
+    /** What a protected instruction does when no partner FU is free. */
+    ShadowPolicy shadowPolicy;
+
+    /** Whether the shadow execution consumes an issue slot. */
+    bool shadowUsesIssueSlot;
+
+    /** Cycles to compare primary and shadow results before broadcast. */
+    Cycles shadowCompareLatency;
+
+    /** Permanent-fault experiment: the stuck unit (-1: none), and whether
+     * it has been taken out of service. */
+    int stuckFu = -1;
+    bool stuckFuRetired = false;
+
     /** Per Thread IQ count */
     unsigned count[MaxThreads];
 
@@ -604,6 +641,11 @@ class InstructionQueue
         statistics::Scalar FloatMiscShadowNotAvailable;
         statistics::Scalar ShadowIsSameFU;
         statistics::Scalar ShadowIsNotSameFU;
+        statistics::Scalar shadowTemporal;
+        statistics::Scalar shadowWaits;
+        statistics::Scalar protectedNotDuplicable;
+        statistics::Scalar stuckFuResults;
+        statistics::Scalar stuckFuRetireCycle;
     } iqIOStats;
 };
 

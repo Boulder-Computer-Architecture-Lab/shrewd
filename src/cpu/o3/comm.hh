@@ -84,6 +84,24 @@ struct RenameStruct
     DynInstPtr insts[MaxWidth];
 };
 
+/**
+ * SHAFT mode state that rename restores when it processes a squash. It
+ * travels with the squash signal so the restore happens in rename, after
+ * any younger (wrong-path) markers it renamed in the meantime.
+ */
+struct ShaftRestore
+{
+    bool valid = false;
+    bool protectionFlag = false;
+    bool noCommitCountFlag = false;
+
+    /** Fault injector window state; only IEW squashes restore it. */
+    bool injectorValid = false;
+    bool faultInjectActive = false;
+    uint64_t faultInjectCount = 0;
+    uint64_t faultInjectTarget = 0;
+};
+
 /** Struct that defines the information passed from IEW to commit. */
 struct IEWStruct
 {
@@ -99,6 +117,8 @@ struct IEWStruct
     bool branchMispredict[MaxThreads];
     bool branchTaken[MaxThreads];
     bool includeSquashInst[MaxThreads];
+
+    ShaftRestore shaftRestore[MaxThreads];
 };
 
 struct IssueStruct
@@ -195,6 +215,9 @@ struct TimeStruct
 
         bool squash = false; // *F, D, R, I
         bool robSquashing = false; // *F, D, R, I
+
+        /// SHAFT mode state to restore with this squash
+        ShaftRestore shaftRestore; // *R
 
         /// Rename should re-read number of free rob entries
         bool usedROB = false; // *R

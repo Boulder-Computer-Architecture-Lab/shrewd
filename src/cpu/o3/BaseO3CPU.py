@@ -61,6 +61,28 @@ class CommitPolicy(ScopedEnum):
     vals = ["RoundRobin", "OldestReady"]
 
 
+# How protected instructions are checked: FuDup duplicates the execution on
+# a second FU (compared before broadcast); Die gives each one a redundant
+# twin with its own IQ/ROB entry and FU (compared at commit); Diva verifies
+# them in a commit-stage checker.
+class ShaftMechanism(ScopedEnum):
+    vals = ["FuDup", "Die", "Diva"]
+
+
+# Which instructions the Diva checker verifies: Marked follows the
+# secon/secoff protection bit, Kernel checks everything not in user mode
+# (decided at commit from architectural state), All checks everything.
+class DivaPolicy(ScopedEnum):
+    vals = ["Marked", "Kernel", "All"]
+
+
+# What a protected instruction does when no second FU of its class is free:
+# Opportunistic issues it unchecked (original behaviour), SpatialWait waits
+# until two units are free, Temporal re-runs it on the same unit.
+class ShadowPolicy(ScopedEnum):
+    vals = ["Opportunistic", "SpatialWait", "Temporal", "Hybrid"]
+
+
 class BaseO3CPU(BaseCPU):
     type = "BaseO3CPU"
     cxx_class = "gem5::o3::CPU"
@@ -235,3 +257,52 @@ class BaseO3CPU(BaseCPU):
     )
     shrewdDefaultOn = Param.Bool(False,
         "Start with protection flag ON (100% HW duplication, no secon needed)")
+    shaftMechanism = Param.ShaftMechanism(
+        "FuDup", "How protected instructions are checked"
+    )
+    divaPolicy = Param.DivaPolicy(
+        "Marked", "Which instructions the Diva checker verifies"
+    )
+    divaWidth = Param.Unsigned(
+        2, "Checks the Diva checker starts per cycle (in program order)"
+    )
+    divaLatency = Param.Cycles(
+        4, "Cycles from an instruction's completion until its check is done"
+    )
+    divaLoadLatency = Param.Cycles(
+        2, "Extra Diva check cycles for a load's cache re-read"
+    )
+    shadowPolicy = Param.ShadowPolicy(
+        "SpatialWait",
+        "How a protected instruction is re-executed (with priorityToShadow): "
+        "SpatialWait on a second free unit, waiting for one; Temporal again "
+        "on its own unit; Hybrid on a second unit if one is free, else "
+        "again on its own; Opportunistic on a second unit if one is free, "
+        "else unchecked",
+    )
+    shadowUsesIssueSlot = Param.Bool(
+        True, "The shadow execution consumes an issue slot"
+    )
+    shadowCompareLatency = Param.Cycles(
+        0, "Cycles to compare primary and shadow results before broadcast"
+    )
+    stuckFuOpClass = Param.OpClass(
+        "No_OpClass",
+        "Permanent-fault experiment: one unit with this capability corrupts "
+        "every result it computes until a redundant execution exposes it, "
+        "which takes it out of service (No_OpClass disables)",
+    )
+    stuckFuInstance = Param.Unsigned(
+        0, "Which unit with stuckFuOpClass is stuck (0: the first)"
+    )
+    shaftCommitLog = Param.Bool(
+        False,
+        "On every stats dump, write <cpu>.shaft_pcs.csv: per committed PC "
+        "the committed, protected and checked counts since the last reset",
+    )
+    shaftArchMiscReg = Param.Int(
+        -1,
+        "Misc register holding the architectural protection mode; used to "
+        "sync the rename/commit flags on CPU switch-in and checkpoint "
+        "restore (-1 disables)",
+    )

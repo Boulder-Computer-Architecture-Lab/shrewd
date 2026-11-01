@@ -278,10 +278,28 @@ class CPU : public BaseCPU
     /** Takes over from another CPU. */
     void takeOverFrom(BaseCPU *oldCPU) override;
 
+    /**
+     * Sets a thread's SHAFT mode flags from the architectural copy
+     * (shaftArchMiscReg) once its state has been loaded from another CPU
+     * or a checkpoint; otherwise a switch inside a marked region would
+     * lose the mode until the next marker.
+     */
+    void syncShaftModeFromArch(ThreadID tid);
+
     void verifyMemoryMode() const override;
 
-    /** Get the current instruction sequence number, and increment it. */
-    InstSeqNum getAndIncrementInstSeq() { return globalSeqNum++; }
+    /**
+     * Get the current instruction sequence number, and increment it. With
+     * the DIE mechanism every instruction leaves seqNum + 1 free for its
+     * twin, which must sit right behind it in program order.
+     */
+    InstSeqNum
+    getAndIncrementInstSeq()
+    {
+        const InstSeqNum seq = globalSeqNum;
+        globalSeqNum += seqStride;
+        return seq;
+    }
 
     /** Traps to handle given fault. */
     void trap(const Fault &fault, ThreadID tid, const StaticInstPtr &inst);
@@ -525,6 +543,14 @@ class CPU : public BaseCPU
 
     /** The global sequence number counter. */
     InstSeqNum globalSeqNum;//[MaxThreads];
+
+    /** SHAFT parameters needed to sync the mode from the architecture. */
+    bool shrewdDefaultOn;
+    bool seconNoCountMode;
+    int shaftArchMiscReg;
+
+    /** Sequence number step (2 with DIE, see getAndIncrementInstSeq()). */
+    InstSeqNum seqStride;
 
     /** Pointer to the checker, which can dynamically verify
      * instruction results at run time.  This can be set to NULL if it

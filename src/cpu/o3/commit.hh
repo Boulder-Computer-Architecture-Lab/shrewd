@@ -42,6 +42,8 @@
 #define __CPU_O3_COMMIT_HH__
 
 #include <queue>
+#include <string>
+#include <unordered_map>
 
 #include "base/statistics.hh"
 #include "cpu/exetrace.hh"
@@ -54,6 +56,7 @@
 #include "cpu/o3/rob.hh"
 #include "cpu/timebuf.hh"
 #include "enums/CommitPolicy.hh"
+#include "enums/DivaPolicy.hh"
 #include "sim/probe/probe.hh"
 
 namespace gem5
@@ -246,6 +249,23 @@ class Commit
     void squashFromSquashAfter(ThreadID tid);
 
     /**
+     * SHAFT mode to resume in after a trap: the mode of the ROB head (the
+     * trapping instruction, or the next one for an interrupt), since a
+     * marker between the last committed instruction and it is not
+     * re-fetched. Falls back to the committed mode if the ROB is empty.
+     */
+    ShaftRestore shaftRestoreAtHead(ThreadID tid);
+
+    /** SHAFT mode after the last committed instruction. */
+    ShaftRestore shaftRestoreCommitted(ThreadID tid);
+
+    /** Counts a committed instruction in the per-PC SHAFT log. */
+    void logShaftCommit(const DynInstPtr &inst);
+
+    /** Writes the per-PC SHAFT log (on a stats dump). */
+    void dumpShaftCommitLog();
+
+    /**
      * Handle squashing from instruction with SquashAfter set.
      *
      * This differs from the other squashes as it squashes following
@@ -347,6 +367,48 @@ class Commit
 
     /** If true, keep protection enabled for all instructions. */
     bool shrewdDefaultOn;
+
+    /** secon/secoff mark no-count regions instead of protection. */
+    bool seconNoCountMode;
+
+    /** Misc reg mirroring the committed marker mode (-1: none). */
+    int shaftArchMiscReg;
+
+    /**
+     * Per committed PC since the last stats reset: how many committed, how
+     * many were protected, and how many of those were actually checked.
+     * Feeds the SDC coverage estimate of a run.
+     */
+    struct ShaftPcCount
+    {
+        std::string mnemonic;
+        uint64_t committed = 0;
+        uint64_t protectedInsts = 0;
+        uint64_t checked = 0;
+    };
+    bool shaftCommitLog;
+    std::unordered_map<Addr, ShaftPcCount> shaftPcCounts;
+
+    /**
+     * Diva mechanism: a timing model of an in-order commit-stage checker.
+     * It starts divaWidth checks per cycle in program order; a check is
+     * done divaLatency cycles after the instruction completed (plus
+     * divaLoadLatency for a load's cache re-read), and the instruction
+     * cannot retire before.
+     */
+    bool divaEnabled;
+    DivaPolicy divaPolicy;
+    unsigned divaWidth;
+    Cycles divaLatency;
+    Cycles divaLoadLatency;
+    /** Start slot of the last check, in 1/divaWidth cycle units. */
+    uint64_t divaLastStart = 0;
+
+    /** Whether the last committed instruction was protected. */
+    bool lastCommittedProtected[MaxThreads] = {};
+
+    /** Whether the Diva checker verifies this instruction. */
+    bool divaNeedsCheck(const DynInstPtr &inst, ThreadID tid);
 
     /** Vector of all of the threads. */
     std::vector<ThreadState *> thread;
@@ -493,6 +555,26 @@ class Commit
 
         /** Number of cycles where the commit bandwidth limit is reached. */
         statistics::Scalar commitEligibleSamples;
+
+        /** DIE mechanism: twins retired, cycles a primary waited at the
+         * ROB head for its twin, and mismatches re-executed. */
+        statistics::Scalar dieTwinsRetired;
+        statistics::Scalar dieTwinWaitCycles;
+        statistics::Scalar dieMismatches;
+
+        /** Diva mechanism: instructions checked, cycles the ROB head
+         * waited for its check, and mismatches re-executed. */
+        statistics::Scalar divaChecked;
+        statistics::Scalar divaGateStallCycles;
+        statistics::Scalar divaMismatches;
+
+        /** Injected faults that retired undetected (escapes). */
+        statistics::Scalar faultsCommitted;
+        statistics::Scalar protectedFaultsCommitted;
+
+        /** Protection changes between consecutive committed
+         * instructions: the markers a region-marked binary executes. */
+        statistics::Scalar protectionToggles;
     } stats;
 };
 

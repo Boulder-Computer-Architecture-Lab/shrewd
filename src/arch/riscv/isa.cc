@@ -432,6 +432,8 @@ void ISA::clear()
     miscRegFile[MISCREG_NMIE] = enableSmrnmi() ? 0 : 1;
 
     // Protection Status Register
+    static_assert(MISCREG_PROTECTION == 193,
+                  "RiscvO3CPU.shaftArchMiscReg (RiscvCPU.py) hardcodes 193");
     miscRegFile[MISCREG_PROTECTION] = 0;
 }
 

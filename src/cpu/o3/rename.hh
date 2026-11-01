@@ -450,6 +450,17 @@ class Rename
     /** Fault injector window size (0 disables injection). */
     unsigned faultInjectionWindow;
 
+    /** DIE mechanism: protected instructions get a redundant twin. */
+    bool makeShaftTwins;
+
+
+    /**
+     * Creates the DIE twin of a renamed protected instruction: it reads the
+     * same physical source registers and takes seqNum + 1, right behind it
+     * in the CPU's instruction list.
+     */
+    DynInstPtr createShaftTwin(const DynInstPtr &inst, ThreadID tid);
+
     /** RNG for per-window random target selection. */
     Random::RandomPtr rng;
 
@@ -511,6 +522,8 @@ class Rename
         statistics::Scalar unblockCycles;
         /** Stat for total number of renamed instructions. */
         statistics::Scalar renamedInsts;
+        /** Instructions the fault injector marked (incl. wrong path). */
+        statistics::Scalar faultsMarked;
         /** Stat for total number of squashed instructions that rename
          * discards. */
         statistics::Scalar squashedInsts;

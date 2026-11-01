@@ -462,16 +462,15 @@ IEW::squashDueToBranch(const DynInstPtr& inst, ThreadID tid)
             " PC: %s "
             "\n", tid, inst->seqNum, inst->pcState() );
 
-    cpu->thread[tid]->protectionFlag = inst->savedProtectionFlag;
-    cpu->thread[tid]->noCommitCountFlag = inst->savedNoCommitCountFlag;
-    cpu->thread[tid]->faultInjectActive = inst->savedFaultInjectActive;
-    cpu->thread[tid]->faultInjectCount = inst->savedFaultInjectCount;
-    cpu->thread[tid]->faultInjectTarget = inst->savedFaultInjectTarget;
+    // A branch with a DIE twin keeps it: the squash starts after the twin
+    // (seqNum + 1), so the pair still retires and is compared.
+    const InstSeqNum squash_seq = inst->shaftTwin ?
+        inst->shaftTwin->seqNum : inst->seqNum;
 
     if (!toCommit->squash[tid] ||
-            inst->seqNum < toCommit->squashedSeqNum[tid]) {
+            squash_seq < toCommit->squashedSeqNum[tid]) {
         toCommit->squash[tid] = true;
-        toCommit->squashedSeqNum[tid] = inst->seqNum;
+        toCommit->squashedSeqNum[tid] = squash_seq;
         toCommit->branchTaken[tid] = inst->pcState().branching();
 
         set(toCommit->pc[tid], inst->pcState());
@@ -479,6 +478,16 @@ IEW::squashDueToBranch(const DynInstPtr& inst, ThreadID tid)
 
         toCommit->mispredictInst[tid] = inst;
         toCommit->includeSquashInst[tid] = false;
+
+        // Rename restores the mode after the branch when it squashes.
+        ShaftRestore &restore = toCommit->shaftRestore[tid];
+        restore.valid = true;
+        restore.protectionFlag = inst->savedProtectionFlag;
+        restore.noCommitCountFlag = inst->savedNoCommitCountFlag;
+        restore.injectorValid = true;
+        restore.faultInjectActive = inst->savedFaultInjectActive;
+        restore.faultInjectCount = inst->savedFaultInjectCount;
+        restore.faultInjectTarget = inst->savedFaultInjectTarget;
 
         wroteToTimeBuffer = true;
     }
@@ -490,20 +499,6 @@ IEW::squashDueToMemOrder(const DynInstPtr& inst, ThreadID tid)
 {
     DPRINTF(IEW, "[tid:%i] Memory violation, squashing violator and younger "
             "insts, PC: %s [sn:%llu].\n", tid, inst->pcState(), inst->seqNum);
-
-    if (inst->isControl()) {
-        cpu->thread[tid]->protectionFlag = inst->savedProtectionFlag;
-        cpu->thread[tid]->noCommitCountFlag = inst->savedNoCommitCountFlag;
-        cpu->thread[tid]->faultInjectActive = inst->savedFaultInjectActive;
-        cpu->thread[tid]->faultInjectCount = inst->savedFaultInjectCount;
-        cpu->thread[tid]->faultInjectTarget = inst->savedFaultInjectTarget;
-    } else {
-        cpu->thread[tid]->protectionFlag = inst->protected_;
-        cpu->thread[tid]->noCommitCountFlag = inst->savedNoCommitCountFlag;
-        cpu->thread[tid]->faultInjectActive = inst->faultInjectActive_;
-        cpu->thread[tid]->faultInjectCount = inst->faultInjectCount_;
-        cpu->thread[tid]->faultInjectTarget = inst->faultInjectTarget_;
-    }
 
     // Need to include inst->seqNum in the following comparison to cover the
     // corner case when a branch misprediction and a memory violation for the
@@ -522,42 +517,22 @@ IEW::squashDueToMemOrder(const DynInstPtr& inst, ThreadID tid)
         // Must include the memory violator in the squash.
         toCommit->includeSquashInst[tid] = true;
 
-        wroteToTimeBuffer = true;
-    }
-}
-
-void
-IEW::squashDueToShrewdFault(const DynInstPtr& inst, ThreadID tid)
-{
-    DPRINTF(IEW, "[tid:%i] [sn:%llu] Shrewd fault injection on protected "
-            "instruction, squashing younger instructions. PC: %s\n",
-            tid, inst->seqNum, inst->pcState());
-
-    if (inst->isControl()) {
-        cpu->thread[tid]->protectionFlag = inst->savedProtectionFlag;
-        cpu->thread[tid]->noCommitCountFlag = inst->savedNoCommitCountFlag;
-        cpu->thread[tid]->faultInjectActive = inst->savedFaultInjectActive;
-        cpu->thread[tid]->faultInjectCount = inst->savedFaultInjectCount;
-        cpu->thread[tid]->faultInjectTarget = inst->savedFaultInjectTarget;
-    } else {
-        cpu->thread[tid]->protectionFlag = inst->protected_;
-        cpu->thread[tid]->noCommitCountFlag = inst->savedNoCommitCountFlag;
-        cpu->thread[tid]->faultInjectActive = inst->faultInjectActive_;
-        cpu->thread[tid]->faultInjectCount = inst->faultInjectCount_;
-        cpu->thread[tid]->faultInjectTarget = inst->faultInjectTarget_;
-    }
-
-    if (!toCommit->squash[tid] ||
-            inst->seqNum < toCommit->squashedSeqNum[tid]) {
-        toCommit->squash[tid] = true;
-        toCommit->squashedSeqNum[tid] = inst->seqNum;
-        toCommit->branchTaken[tid] = false;
-
-        set(toCommit->pc[tid], inst->pcState());
-        inst->staticInst->advancePC(*toCommit->pc[tid]);
-
-        toCommit->mispredictInst[tid] = nullptr;
-        toCommit->includeSquashInst[tid] = false;
+        // Rename restores the mode the violator was renamed in. Markers
+        // never reach IEW, so the pre- and post-rename flags are equal.
+        ShaftRestore &restore = toCommit->shaftRestore[tid];
+        restore.valid = true;
+        restore.protectionFlag = inst->savedProtectionFlag;
+        restore.noCommitCountFlag = inst->savedNoCommitCountFlag;
+        restore.injectorValid = true;
+        if (inst->isControl()) {
+            restore.faultInjectActive = inst->savedFaultInjectActive;
+            restore.faultInjectCount = inst->savedFaultInjectCount;
+            restore.faultInjectTarget = inst->savedFaultInjectTarget;
+        } else {
+            restore.faultInjectActive = inst->faultInjectActive_;
+            restore.faultInjectCount = inst->faultInjectCount_;
+            restore.faultInjectTarget = inst->faultInjectTarget_;
+        }
 
         wroteToTimeBuffer = true;
     }
@@ -1328,7 +1303,11 @@ IEW::executeInsts()
 
             inst->setExecuted();
 
-            instToCommit(inst);
+            // If Shrewd protected+injected with shadow, skip sending to
+            // commit; the instruction will be rescheduled to issue.
+            if (!(enableShrewd && inst->shadowMismatch())) {
+                instToCommit(inst);
+            }
         }
 
         updateExeInstStats(inst);
@@ -1343,14 +1322,26 @@ IEW::executeInsts()
         // instruction first, so the branch resolution order will be correct.
         ThreadID tid = inst->threadNumber;
 
-        if (enableShrewd && inst->faultInjected_ && inst->protected_) {
-            if (!fetchRedirect[tid] ||
-                !toCommit->squash[tid] ||
-                toCommit->squashedSeqNum[tid] > inst->seqNum) {
-                fetchRedirect[tid] = true;
-                squashDueToShrewdFault(inst, tid);
-                ++iewStats.shrewdFaultSquashes;
-            }
+        if (enableShrewd && inst->shadowMismatch() && !inst->isMemRef()) {
+            DPRINTF(IEW, "[tid:%i] [sn:%llu] Shrewd: protected+injected "
+                    "inst with shadow, rescheduling to issue queue. "
+                    "PC: %s\n", tid, inst->seqNum, inst->pcState());
+
+            // Clear fault so re-execution produces the correct result
+            // (a stuck unit is diagnosed and no longer used).
+            instQueue.retireStuckFu();
+            inst->faultInjected_ = false;
+            inst->shadowFaulty_ = false;
+            inst->hasShadow_ = false;
+
+            // Reset execution state for re-issue.
+            inst->clearExecuted();
+            inst->clearCanCommit();
+
+            // Reschedule into the IQ ready list.
+            instQueue.rescheduleInst(inst);
+
+            ++iewStats.shrewdFaultSquashes;
             continue;
         }
 

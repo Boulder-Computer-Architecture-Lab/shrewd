@@ -147,6 +147,7 @@ FUPool::FUPool(const Params &p)
     }
 
     unitBusy.resize(numFU);
+    unitDisabled.assign(numFU, false);
 
     for (int i = 0; i < numFU; i++) {
         unitBusy[i] = false;
@@ -308,6 +309,52 @@ FUPool::freeUnitNextCycle(int fu_idx)
 }
 
 void
+FUPool::releaseUnit(int fu_idx)
+{
+    assert(unitBusy[fu_idx]);
+    unitBusy[fu_idx] = unitDisabled[fu_idx];
+}
+
+int
+FUPool::unitWith(OpClass capability, unsigned n) const
+{
+    for (int i = 0; i < numFU; ++i) {
+        if (funcUnits[i]->provides(capability) && n-- == 0)
+            return i;
+    }
+    return -1;
+}
+
+void
+FUPool::disableUnit(int fu_idx)
+{
+    unitDisabled[fu_idx] = true;
+    unitBusy[fu_idx] = true;
+}
+
+bool
+FUPool::hasShadowCapability(OpClass capability)
+{
+    // Must match the shadow cases in getUnit().
+    switch (capability) {
+      case OpClass::IntAlu:
+      case OpClass::IntMult:
+      case OpClass::IntDiv:
+      case OpClass::FloatAdd:
+      case OpClass::FloatMult:
+      case OpClass::FloatDiv:
+      case OpClass::FloatSqrt:
+      case OpClass::FloatMultAcc:
+      case OpClass::FloatCvt:
+      case OpClass::FloatCmp:
+      case OpClass::FloatMisc:
+        return true;
+      default:
+        return false;
+    }
+}
+
+void
 FUPool::processFreeUnits()
 {
     while (!unitsToBeFreed.empty()) {
@@ -316,7 +363,7 @@ FUPool::processFreeUnits()
 
         assert(unitBusy[fu_idx]);
 
-        unitBusy[fu_idx] = false;
+        unitBusy[fu_idx] = unitDisabled[fu_idx];
     }
 }
 
@@ -359,7 +406,7 @@ FUPool::isDrained() const
 {
     bool is_drained = true;
     for (int i = 0; i < numFU; i++)
-        is_drained = is_drained && !unitBusy[i];
+        is_drained = is_drained && (!unitBusy[i] || unitDisabled[i]);
 
     return is_drained;
 }

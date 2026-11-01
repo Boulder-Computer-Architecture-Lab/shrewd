@@ -1335,11 +1335,14 @@ decode QUADRANT default Unknown::unknown() {
 
         0x02: decode FUNCT3 {
             format SystemOp {
+                // O3 drops these at rename and tracks the mode there; the
+                // simple CPUs execute them, keeping the architectural copy
+                // current across fast-forward, CPU switches and checkpoints.
                 0x0: secoff({{
-                    //Only modifies micro flag so no changes to architecture needed
+                    xc->setMiscReg(MISCREG_PROTECTION, 0);
                 }}, No_OpClass);
                 0x1: secon({{
-                    //Only modifies micro flag so no changes to architecture needed
+                    xc->setMiscReg(MISCREG_PROTECTION, 1);
                 }}, No_OpClass);
             }
         }
