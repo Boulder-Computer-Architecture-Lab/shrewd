@@ -257,6 +257,30 @@ class BaseO3CPU(BaseCPU):
     )
     shrewdDefaultOn = Param.Bool(False,
         "Start with protection flag ON (100% HW duplication, no secon needed)")
+    shaftDomainOnly = Param.Bool(
+        False,
+        "Protect only instructions in the fault model (ALU instructions "
+        "with a destination register): for default-on and AVF-guided "
+        "protection, so they protect what markers can select",
+    )
+    avfInterval = Param.UInt64(
+        0,
+        "AVF monitor: interval length in committed instructions (0 "
+        "disables). Each interval's ROB, IQ and LSQ AVF (committed "
+        "instructions' residency, Little's law) goes to <cpu>.shaft_avf.csv",
+    )
+    avfSchedule = Param.String(
+        "",
+        "AVF-guided protection: file listing the intervals (one index per "
+        "line, counted from the last stats reset) in which every "
+        "instruction is protected; markers are ignored",
+    )
+    dupRegNoCount = Param.Bool(
+        False,
+        "Software-duplication binaries: instructions that read or write "
+        "x31 or f31 (reserved for the duplicate and its check) are not "
+        "program instructions and are not counted",
+    )
     shaftMechanism = Param.ShaftMechanism(
         "FuDup", "How protected instructions are checked"
     )
@@ -266,11 +290,21 @@ class BaseO3CPU(BaseCPU):
     divaWidth = Param.Unsigned(
         2, "Checks the Diva checker starts per cycle (in program order)"
     )
-    divaLatency = Param.Cycles(
-        4, "Cycles from an instruction's completion until its check is done"
+    # As in Austin's DIVA: the computation pipeline re-executes with its own
+    # copy of the instruction's unit plus a compare stage, the communication
+    # pipeline (register and cache re-read) takes divaMinLatency cycles in
+    # parallel, and a check takes the longer of the two.
+    divaCompareLatency = Param.Cycles(
+        1, "Cycles the Diva computation pipeline adds to the unit's latency"
+    )
+    divaMinLatency = Param.Cycles(
+        2, "Cycles of the Diva communication pipeline (read and check)"
     )
     divaLoadLatency = Param.Cycles(
-        2, "Extra Diva check cycles for a load's cache re-read"
+        1, "Cycles of a load's cache re-read in the Diva checker"
+    )
+    divaLatencyScale = Param.Unsigned(
+        1, "Multiplies every Diva check latency (deeper checker pipeline)"
     )
     shadowPolicy = Param.ShadowPolicy(
         "SpatialWait",

@@ -6,6 +6,7 @@ from start to finish (no ATOMIC warmup, no processor switch, no MAX_INSTS
 scheduling).
 """
 import argparse
+from pathlib import Path
 
 from m5.stats import dump, reset
 
@@ -62,8 +63,18 @@ parser.add_argument("--diva-policy", default="Marked",
                     help="Which instructions the Diva checker verifies")
 parser.add_argument("--diva-width", type=int, default=2,
                     help="Diva checks started per cycle")
-parser.add_argument("--diva-latency", type=int, default=4,
-                    help="Cycles from completion until a Diva check is done")
+parser.add_argument("--diva-latency-scale", type=int, default=1,
+                    help="Multiplies every Diva check latency (default 1: "
+                         "the checked unit's latency + 1, at least 2)")
+parser.add_argument("--protect-domain-only", action="store_true",
+                    help="Default-on and AVF-guided protection cover only "
+                         "ALU instructions with a destination register")
+parser.add_argument("--avf-interval", type=int, default=0,
+                    help="AVF monitor interval in committed instructions "
+                         "(writes <cpu>.shaft_avf.csv; 0 disables)")
+parser.add_argument("--avf-schedule", default=None,
+                    help="AVF-guided protection: file of the intervals to "
+                         "protect (needs --avf-interval)")
 parser.add_argument("--shadow-policy", default="SpatialWait",
                     choices=["Opportunistic", "SpatialWait", "Temporal", "Hybrid"],
                     help="What a protected inst does when no partner FU is free")
@@ -127,6 +138,10 @@ board.set_se_binary_workload(
 for core in processor.get_cores():
     sim_core = core.get_simobject()
     sim_core.shaftCommitLog = True
+    sim_core.avfInterval = args.avf_interval
+    if args.avf_schedule:
+        sim_core.avfSchedule = str(Path(args.avf_schedule).resolve())
+    sim_core.shaftDomainOnly = args.protect_domain_only
     if args.stuck_fu:
         op_class, _, n = args.stuck_fu.partition(":")
         sim_core.stuckFuOpClass = op_class
@@ -137,7 +152,7 @@ for core in processor.get_cores():
         sim_core.shaftMechanism = args.mechanism
         sim_core.divaPolicy = args.diva_policy
         sim_core.divaWidth = args.diva_width
-        sim_core.divaLatency = args.diva_latency
+        sim_core.divaLatencyScale = args.diva_latency_scale
         sim_core.priorityToShadow = True
         if args.legacy_shadow:
             sim_core.shadowPolicy = "Opportunistic"

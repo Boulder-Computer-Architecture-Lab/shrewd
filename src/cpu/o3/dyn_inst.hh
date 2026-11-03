@@ -364,6 +364,12 @@ class DynInst : public ExecContext, public RefCounted
     // Cycle the instruction completed (commit saw it written back).
     Cycles shaftCompleteCycle = Cycles(0);
 
+    // AVF monitor: when the instruction entered the ROB, entered the
+    // IQ/LSQ, and issued.
+    Cycles shaftRobCycle = Cycles(0);
+    Cycles shaftIqCycle = Cycles(0);
+    Cycles shaftIssueCycle = Cycles(0);
+
     // Diva mechanism: verified by the checker, and when that is done.
     bool divaChecked_ = false;
     Cycles divaDoneCycle = Cycles(0);

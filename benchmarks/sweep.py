@@ -11,26 +11,34 @@ and checkpoints that already finished are skipped.
                                              <EXPS>_summary.csv (per config)
 
 Experiments (default: all):
-    E1  impact vs likelihood: line-level S / L / R marker binaries, 5-50%,
-        under the temporal schemes (Temporal, DIE)
-    E2  mechanism spectrum on the S binaries: spatial, temporal, hybrid,
-        DIE and Diva, plus everything protected
-    E3  Diva provisioning: checker width x latency, all vs S-selected
-    E6  the old model's unchecked fallback (opportunistic shadows)
-    EB  SHAFT vs software duplication, on the existing (OLD) and the new
-        binaries
+    E1  which instructions to protect: impact-guided markers (S, from the
+        injection campaign), random markers (R), and hardware-only
+        AVF-guided protection (no markers) at the same protected shares
+    E2  where selectivity pays: SHAFT on S vs software duplication of the
+        same instructions vs everything protected, under the
+        resource-sharing mechanisms (same-unit and idle-unit re-execution,
+        DIE)
+    E3  spatial redundancy: the Diva checker's width (and latency) with S
+        markers vs checking everything
     EP  permanent fault: a stuck FloatAdd unit under each mechanism
-    EF  FT-GMRES (whole program): no markers, the developer's annotation
-        of the reliable part, and line-level S / L selections at its budget
+    EF  FT-GMRES (whole program): the developer's annotation of the reliable
+        part (its ALU instructions, or the whole region) vs S at its budget
+        vs AVF-guided protection at its share
 Each marker binary also runs with --markers-only (markers executed, nothing
 checked), which splits its overhead into the markers' and the mechanism's.
 
-Binaries, by family (each compared with its own matched baseline):
-    OLD   protected_binaries/<b>/: base, prot<L>, dup<L>  (the existing
-          type-level selections)
-    LINE  selection_binaries/<b>/: lbase, S<L>, L<L>, R<L>, Sdup<L>
-          (build_selection_binaries.py)
-    FT    ftgmres/: none, annotated, S, L
+Every run logs the core's AVF per interval (<cpu>.shaft_avf.csv). AVF-guided
+runs protect the intervals in which the unprotected run's AVF was highest:
+their schedules (<results>/<bench>/avf_schedules/) are written by `run` once
+that run is done, so a second `run` starts them.
+
+Binaries (selection_binaries/<b>/, build_selection_binaries.py; all with t6
+and ft11 reserved, otherwise identical code):
+    lbase      unprotected
+    S<L>, R<L> markers around the S or R selection of L% of the window's
+               ALU instructions (select_window.py)
+    Sdup<L>    software duplication of the S selection
+FT-GMRES (ftgmres/): none, annotated, S.
 
 Layout: <checkpoints>/<bench>/<binary>/simpoint_<N>/ and
 <results>/<bench>/<config>/simpoint_<N>/ (FT-GMRES: .../full/), with
@@ -58,7 +66,7 @@ SELECTION_BINARIES = SCRIPT_DIR / "selection_binaries"
 FTGMRES_DIR = SCRIPT_DIR / "ftgmres"
 
 BENCHMARKS = ["bwaves", "cactuBSSN", "lbm", "nab", "namd", "parest",
-              "povray", "roms"]
+              "povray"]
 FTGMRES = "ftgmres"
 FTGMRES_ARGS = ["64"]
 CONFIG = dict(rc.BENCHMARK_CONFIG)
@@ -72,16 +80,12 @@ CONFIG.setdefault("povray", {
 # Peak gem5 RSS per benchmark (GB) until a finished run of it reports its
 # own; then 1.15x the largest seen.
 MEM_GB = {"bwaves": 1.3, "cactuBSSN": 1.3, "lbm": 0.7, "nab": 0.7,
-          "namd": 0.7, "parest": 1.0, "povray": 0.6, "roms": 1.4,
-          FTGMRES: 0.5}
+          "namd": 0.7, "parest": 1.0, "povray": 0.6, FTGMRES: 0.5}
 
-BUDGETS = (5, 10, 20, 50)
-
-# Benchmarks without LINE-family runs: roms' hot loop (lmd_swfrac) compiles
-# to different instructions in the campaign's build and the pipeline's, so
-# its line-level selections cannot be carried over (and its SDC risk is in
-# libm's exp, which no rebuild of roms can mark).
-NO_LINE_FAMILY = {"roms"}
+# Protection levels: shares (%) of the window's ALU instructions.
+LEVELS = (10, 25, 50, 75)
+# AVF monitor interval, in committed instructions.
+AVF_INTERVAL = 100_000
 
 # ── Binaries and configurations ─────────────────────────────────────────
 
@@ -97,122 +101,108 @@ def binary(bench, key):
     stem = cfg["binary"][:-len(".riscv")]
     spec_run = (rc.BASELINE_DIR / cfg["spec_num"] / "run" /
                 "run_base_refrate_riscv.0000")
-
-    def stdin(d):
-        return d / cfg["stdin"] if cfg["stdin"] else None
-
-    if key == "base":
-        return Binary(rc.PROTECTED_DIR / bench / "baseline" /
-                      f"{stem}.baseline.riscv", spec_run, stdin(spec_run),
-                      False)
+    stdin = spec_run / cfg["stdin"] if cfg["stdin"] else None
     if key == "lbase":
         return Binary(SELECTION_BINARIES / bench / "baseline" /
-                      f"{stem}.baseline.riscv", spec_run, stdin(spec_run),
-                      False)
-    m = re.fullmatch(r"(prot|dup)(\d+)", key)
-    if m:
-        level_dir = rc.PROTECTED_DIR / bench / f"{m.group(2)}pct"
-        mode = "secon_secoff" if m.group(1) == "prot" else "duplicate"
-        return Binary(level_dir / f"{stem}.{mode}.riscv", level_dir,
-                      stdin(level_dir), m.group(1) == "dup")
-    sel, dup, level = re.fullmatch(r"([SLR])(dup)?(\d+)", key).groups()
+                      f"{stem}.baseline.riscv", spec_run, stdin, False)
+    sel, dup, level = re.fullmatch(r"([SR])(dup)?(\d+)", key).groups()
     mode = "duplicate" if dup else "secon_secoff"
-    return Binary(SELECTION_BINARIES / bench / f"{sel}_line_{level}pct" /
-                  f"{stem}.{mode}.riscv", spec_run, stdin(spec_run),
-                  bool(dup))
+    return Binary(SELECTION_BINARIES / bench / f"{sel}_{level}pct" /
+                  f"{stem}.{mode}.riscv", spec_run, stdin, bool(dup))
 
 
 MECHANISMS = {
     "base": ["--no-shrewd"],                      # unprotected binaries
-    "sw": ["--no-shrewd", "--secon-no-count"],    # software duplication
+    "sw": ["--no-shrewd"],                        # software duplication
     "markers": ["--markers-only"],
-    "spatial": ["--mechanism", "FuDup", "--shadow-policy", "SpatialWait"],
+    # Resource-sharing redundancy: the check reuses the core's own units.
     "temporal": ["--mechanism", "FuDup", "--shadow-policy", "Temporal"],
-    "hybrid": ["--mechanism", "FuDup", "--shadow-policy", "Hybrid"],
-    "opport": ["--mechanism", "FuDup", "--shadow-policy", "Opportunistic"],
+    "idlefu": ["--mechanism", "FuDup", "--shadow-policy", "SpatialWait"],
     "die": ["--mechanism", "Die"],
 }
 
 
 def mechanism(mech):
-    diva = re.fullmatch(r"diva_w(\d+)_l(\d+)", mech)
+    """gem5 arguments of a mechanism; diva_w<W>[_x<S>] is the Diva checker
+    (spatial redundancy) with width W and its latencies scaled by S."""
+    diva = re.fullmatch(r"diva_w(\d+)(?:_x(\d+))?", mech)
     if diva:
         return ["--mechanism", "Diva", "--diva-width", diva.group(1),
-                "--diva-latency", diva.group(2)]
+                "--diva-latency-scale", diva.group(2) or "1"]
     return MECHANISMS[mech]
 
 
-# name, binary key, gem5 config arguments, the family's unprotected config
-Config = namedtuple("Config", "name binary args base")
+# name, binary key, gem5 config arguments, the family's unprotected config,
+# AVF-guided protection level (None: markers or everything)
+Config = namedtuple("Config", "name binary args base avf")
 
 
 def family_base(key):
-    if key in ("none", "annotated", "S", "L"):
-        return "none_base"
-    if key == "base" or re.fullmatch(r"(prot|dup)\d+", key):
-        return "base_base"
-    return "lbase_base"
+    return "none_base" if key in ("none", "annotated", "S") else "lbase_base"
 
 
-def run_config(key, mech, every=False, stuck=None):
-    """Binary <key> under <mech>; every: protect everything (100%);
+def run_config(key, mech, every=False, stuck=None, avf=None, alu=False):
+    """Binary <key> under <mech>; every: protect every ALU instruction;
+    avf: protect the intervals of highest AVF holding that share of them;
+    alu: of the marked instructions, only the ALU ones (FT-GMRES's
+    annotation marks whole regions, loads, stores and branches included);
     stuck: a permanently faulty unit of that op class."""
     args = mechanism(mech)
     name = f"{key}_{mech}"
     if every:
-        args = args + (["--diva-policy", "All"] if mech.startswith("diva")
-                       else ["--shrewd-default-on"])
+        args = args + ["--shrewd-default-on", "--protect-domain-only"]
         name = f"{key}_all_{mech}"
+    if avf:
+        args = args + ["--protect-domain-only"]
+        name = f"{key}_avf{avf}_{mech}"
+    if alu:
+        args = args + ["--protect-domain-only"]
+        name = f"{key}_alu_{mech}"
     if stuck:
         args = args + ["--stuck-fu", stuck]
         name = f"{key}_stuck{stuck}_{mech}"
-    return Config(name, key, args, family_base(key))
+    return Config(name, key, args, family_base(key), avf)
 
 
-def line_family(selection, budgets, mechs):
-    return [run_config(f"{selection}{b}", m) for b in budgets for m in mechs]
+def levels(selection, mechs, at=LEVELS):
+    return [run_config(f"{selection}{lvl}", m) for lvl in at for m in mechs]
 
 
-DIVA = [f"diva_w{w}_l{lat}" for w in (1, 2, 4, 8) for lat in (4, 8)]
+SHARING = ("temporal", "idlefu", "die")
+DIVA = [f"diva_w{w}" for w in (1, 2, 4, 8)]
+# FT-GMRES: the annotation's share of ALU instructions (11.7%, from its
+# campaign profile), for AVF guidance at the same share.
+FTGMRES_SHARE = 12
 
 EXPERIMENTS = {
     "E1": [run_config("lbase", "base")]
-          + [c for s in "SLR"
-             for c in line_family(s, BUDGETS, ("temporal", "die", "markers"))],
+          + levels("S", ("markers", "temporal", "die"))
+          + levels("R", ("markers",))
+          + [run_config("lbase", m, avf=lvl) for lvl in LEVELS
+             for m in ("temporal", "die")],
     "E2": [run_config("lbase", "base")]
-          + line_family("S", BUDGETS, ("spatial", "temporal", "hybrid", "die",
-                                       "diva_w2_l4", "markers"))
-          + [run_config("lbase", m, every=True)
-             for m in ("spatial", "temporal", "die", "diva_w2_l4")],
+          + levels("S", SHARING + ("markers",))
+          + levels("Sdup", ("sw",))
+          + [run_config("lbase", m, every=True) for m in SHARING],
     "E3": [run_config("lbase", "base")]
+          + levels("S", DIVA)
           + [run_config("lbase", d, every=True) for d in DIVA]
-          + line_family("S", BUDGETS,
-                        [f"diva_w{w}_l4" for w in (1, 2, 4, 8)])
-          + line_family("S", (20,), [f"diva_w{w}_l8" for w in (1, 2, 4, 8)]),
-    "E6": [run_config("lbase", "base")]
-          + line_family("S", BUDGETS, ("opport",)),
-    "EB": [run_config("base", "base")]
-          + [run_config(f"prot{b}", m) for b in BUDGETS
-             for m in ("spatial", "temporal", "die", "markers")]
-          + [run_config(f"dup{b}", "sw") for b in BUDGETS]
-          + [run_config("base", m, every=True)
-             for m in ("spatial", "temporal")]
-          + [run_config("lbase", "base")]
-          + [run_config(f"Sdup{b}", "sw") for b in BUDGETS],
+          + levels("S", [f"{d}_x2" for d in DIVA], at=(25,))
+          + [run_config("lbase", f"{d}_x2", every=True) for d in DIVA],
     "EP": [run_config("lbase", "base")]
           + [run_config("S50", m, stuck="FloatAdd")
-             for m in ("markers", "spatial", "temporal", "hybrid", "die",
-                       "diva_w2_l4")],
+             for m in ("markers",) + SHARING + ("diva_w2",)],
     "EF": [run_config("none", "base")]
           + [run_config("none", m, every=True)
-             for m in ("spatial", "temporal", "die", "diva_w1_l4",
-                       "diva_w2_l4")]
-          + [run_config(k, m) for k in ("annotated", "S", "L")
-             for m in ("markers", "spatial", "temporal", "die",
-                       "diva_w1_l4", "diva_w2_l4")]
+             for m in SHARING + ("diva_w1", "diva_w2")]
+          + [run_config(k, m) for k in ("annotated", "S")
+             for m in ("markers",) + SHARING + ("diva_w1", "diva_w2")]
+          + [run_config("annotated", m, alu=True)
+             for m in ("markers",) + SHARING + ("diva_w1", "diva_w2")]
+          + [run_config("none", m, avf=FTGMRES_SHARE)
+             for m in SHARING + ("diva_w1", "diva_w2")]
           + [run_config("annotated", m, stuck="FloatAdd")
-             for m in ("markers", "spatial", "temporal", "die",
-                       "diva_w2_l4")],
+             for m in ("markers",) + SHARING + ("diva_w2",)],
 }
 
 Run = namedtuple("Run", "config bench interval weight")
@@ -231,8 +221,6 @@ def plan(exps, benches, simpoints):
                 continue
             for bench in benches:
                 if bench == FTGMRES:
-                    continue
-                if bench in NO_LINE_FAMILY and cfg.base == "lbase_base":
                     continue
                 for interval, weight in simpoints.get(bench, []):
                     runs.setdefault((cfg.name, bench, interval),
@@ -372,7 +360,7 @@ def cmd_checkpoints(args, runs):
                "--binary", str(b.path), "--simpoint-intervals",
                ",".join(str(i) for i in sorted(intervals))]
         if b.no_count:
-            cmd.append("--secon-no-count")
+            cmd.append("--dup-reg-no-count")
         if b.stdin:
             cmd += ["--stdin", str(b.stdin)]
         if CONFIG[bench]["args"]:
@@ -401,21 +389,57 @@ def is_done(out):
         return False
 
 
+def schedule_path(args, run):
+    """The intervals an AVF-guided run protects."""
+    point = "full" if run.interval is None else f"simpoint_{run.interval}"
+    return (args.results / run.bench / "avf_schedules" /
+            f"{point}_{run.config.avf}pct.txt")
+
+
+def avf_trace(args, run):
+    """The AVF log of the unprotected run at the same SimPoint, once done."""
+    base = run._replace(config=run.config._replace(name=run.config.base))
+    out = run_path(args, base)
+    logs = sorted(out.glob("*.shaft_avf.csv"))
+    return logs[-1] if is_done(out) and logs else None
+
+
+def write_schedule(trace, level, path):
+    """The intervals of highest AVF (ROB + IQ + LSQ, summed as Walcott et
+    al. do) that together hold level% of the run's ALU instructions."""
+    with open(trace) as f:
+        rows = list(csv.DictReader(f))
+    total = sum(int(r["domain"]) for r in rows)
+    chosen, used = [], 0
+    for r in sorted(rows, key=lambda r: -(float(r["avf_rob"]) +
+                                          float(r["avf_iq"]) +
+                                          float(r["avf_lsq"]))):
+        if used >= level / 100 * total:
+            break
+        chosen.append(int(r["interval"]))
+        used += int(r["domain"])
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("".join(f"{i}\n" for i in sorted(chosen)))
+
+
 def run_command(args, run, out):
     """gem5 command line and working directory of one run."""
     b = binary(run.bench, run.config.binary)
+    avf = ["--avf-interval", str(AVF_INTERVAL)]
+    if run.config.avf:
+        avf += ["--avf-schedule", str(schedule_path(args, run))]
     if run.interval is None:
         cmd = [str(args.gem5), "-re", "-d", str(out), str(GEM5_WHOLE),
-               "--binary", str(b.path)] + run.config.args
+               "--binary", str(b.path)] + run.config.args + avf
         return cmd + ["--benchmark-args"] + FTGMRES_ARGS, b.run_dir
     cmd = [str(args.gem5), "-re", "-d", str(out), str(GEM5_CONFIG),
            "--binary", str(b.path), "--simpoint-interval",
-           str(run.interval)] + run.config.args
+           str(run.interval)] + run.config.args + avf
     if not args.no_checkpoint:
         cmd += ["--checkpoint", str(checkpoint_path(
             args, run.bench, run.config.binary, run.interval))]
     if b.no_count:
-        cmd.append("--secon-no-count")
+        cmd.append("--dup-reg-no-count")
     if b.stdin:
         cmd += ["--stdin", str(b.stdin)]
     if CONFIG[run.bench]["args"]:
@@ -424,7 +448,7 @@ def run_command(args, run, out):
 
 
 def cmd_run(args, runs):
-    tasks, skipped = [], 0
+    tasks, skipped, waiting = [], 0, 0
     for run in runs:
         out = run_path(args, run)
         if is_done(out):
@@ -435,6 +459,12 @@ def cmd_run(args, runs):
                      ).exists()):
             skipped += 1
             continue
+        if run.config.avf and not schedule_path(args, run).exists():
+            trace = avf_trace(args, run)
+            if trace is None:
+                waiting += 1
+                continue
+            write_schedule(trace, run.config.avf, schedule_path(args, run))
         cmd, cwd = run_command(args, run, out)
 
         def done(info, out=out):
@@ -444,16 +474,24 @@ def cmd_run(args, runs):
             f"simpoint_{run.interval}"
         tasks.append({"name": f"{run.bench}/{run.config.name}/{point}",
                       "bench": run.bench, "cmd": cmd, "cwd": cwd,
-                      "log": out / "gem5.log", "done": done})
-    # Interleave benchmarks so memory use stays mixed.
-    by_bench = defaultdict(list)
-    for t in tasks:
-        by_bench[t["bench"]].append(t)
-    groups = list(by_bench.values())
-    tasks = [g[i] for i in range(max(map(len, groups), default=0))
-             for g in groups if i < len(g)]
+                      "log": out / "gem5.log", "done": done,
+                      "base": run.config.name == run.config.base})
+
+    def interleaved(group):
+        """Benchmarks interleaved, so memory use stays mixed."""
+        by_bench = defaultdict(list)
+        for t in group:
+            by_bench[t["bench"]].append(t)
+        lists = list(by_bench.values())
+        return [g[i] for i in range(max(map(len, lists), default=0))
+                for g in lists if i < len(g)]
+
+    # The unprotected runs first: AVF-guided runs need their traces.
+    tasks = (interleaved([t for t in tasks if t["base"]]) +
+             interleaved([t for t in tasks if not t["base"]]))
     print(f"{len(tasks)} runs to do ({skipped} skipped: no checkpoint yet; "
-          f"{args.jobs} jobs, {args.mem_gb:.0f} GB)")
+          f"{waiting} waiting for an unprotected run's AVF trace, which "
+          f"the next `run` starts; {args.jobs} jobs, {args.mem_gb:.0f} GB)")
     if args.dry_run:
         for t in tasks[:10]:
             print(" ", " ".join(t["cmd"]))
@@ -508,7 +546,51 @@ def read_stats(path):
     return values
 
 
+def read_avf(out):
+    """Cycle-weighted mean AVF of a run's intervals, per structure."""
+    logs = sorted(out.glob("*.shaft_avf.csv"))
+    if not logs:
+        return {}
+    with open(logs[-1]) as f:
+        rows = list(csv.DictReader(f))
+    cycles = sum(int(r["cycles"]) for r in rows)
+    if not cycles:
+        return {}
+    avf = {f"avf_{k}": sum(int(r["cycles"]) * float(r[f"avf_{k}"])
+                           for r in rows) / cycles
+           for k in ("rob", "iq", "lsq")}
+    avf["avf_intervals"] = len(rows)
+    return avf
+
+
+def run_coverages(args, runs):
+    """run_coverage totals per finished SPEC run. The binaries are looked
+    up here (the runs' config.ini names the paths they ran with, maybe on
+    another machine), once per binary for all the PCs its runs logged."""
+    by_binary = defaultdict(list)
+    for run in runs:
+        out = run_path(args, run)
+        if run.bench != FTGMRES and is_done(out):
+            by_binary[(binary(run.bench, run.config.binary).path,
+                       run.bench)].append(out)
+    totals = {}
+    for (path, bench), outs in by_binary.items():
+        logs = {out: run_coverage.read_log(out) for out in outs}
+        pcs = {pc for rows in logs.values() if rows for pc, *_ in rows}
+        try:
+            tables = run_coverage.pc_tables(str(path), pcs)
+        except (FileNotFoundError, subprocess.CalledProcessError) as e:
+            print(f"{path}: no coverage ({e})", file=sys.stderr)
+            continue
+        for out in outs:
+            if logs[out]:
+                totals[out] = run_coverage.coverage(out, bench,
+                                                    tables=tables)
+    return totals
+
+
 def cmd_collect(args, runs):
+    coverages = run_coverages(args, runs)
     rows = []
     for run in runs:
         out = run_path(args, run)
@@ -524,10 +606,8 @@ def cmd_collect(args, runs):
                                (out / "simout.txt").read_text())
             row["output"] = output.group(0) if output else ""
         else:
-            try:
-                row.update(run_coverage.coverage(out, run.bench) or {})
-            except (FileNotFoundError, subprocess.CalledProcessError) as e:
-                print(f"{out}: no coverage ({e})", file=sys.stderr)
+            row.update(coverages.get(out, {}))
+        row.update(read_avf(out))
         row["maxrss_gb"] = json.loads(
             (out / "done.json").read_text())["maxrss_kb"] / 2**20
         rows.append(row)
@@ -572,10 +652,19 @@ def cmd_collect(args, runs):
             "overhead": cycles / base_cycles - 1 if base_cycles else "",
             "sdc_coverage": (sum(r["weight"] * r.get("sdc_covered", 0)
                                  for r in rs) / mass if mass else ""),
+            "sdc_protected": (sum(r["weight"] * r.get("sdc_protected", 0)
+                                  for r in rs) / mass if mass else ""),
             "protected_share": share("protected"),
             "checked_share": share("checked"),
+            "domain_protected_share": (
+                sum(r["weight"] * r.get("domain_protected", 0) for r in rs) /
+                sum(r["weight"] * r.get("domain_committed", 0) for r in rs)
+                if committed else ""),
             "toggles_per_kinst": (1000 * share("protection_toggles")
                                   if committed else ""),
+            "avf": (sum(r["weight"] * sum(r.get(f"avf_{k}", 0)
+                                          for k in ("rob", "iq", "lsq"))
+                        for r in rs) / w),
             "faults_committed": sum(r.get("faults_committed", 0)
                                     for r in rs),
         })
@@ -621,6 +710,9 @@ def main():
                         help="list: every config and its run count")
     args = parser.parse_args()
 
+    # gem5 runs in each benchmark's run directory, so a relative path to it
+    # would resolve there.
+    args.gem5 = args.gem5.resolve()
     args.experiments = args.experiments or list(EXPERIMENTS)
     unknown = set(args.experiments) - set(EXPERIMENTS)
     if unknown:

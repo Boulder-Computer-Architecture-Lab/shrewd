@@ -55,6 +55,7 @@
 #include "cpu/exetrace.hh"
 #include "cpu/null_static_inst.hh"
 #include "cpu/pred/bpred_unit.hh"
+#include "cpu/shaft_dup.hh"
 #include "cpu/simple/exec_context.hh"
 #include "cpu/simple_thread.hh"
 #include "cpu/smt.hh"
@@ -120,6 +121,7 @@ BaseSimpleCPU::BaseSimpleCPU(const BaseSimpleCPUParams &p)
 
     m_ignoringCount = false;
     m_seconNoCountMode = p.seconNoCountMode;
+    m_dupRegNoCount = p.dupRegNoCount;
 }
 
 void
@@ -150,28 +152,32 @@ BaseSimpleCPU::swapActiveThread()
     }
 }
 
+bool
+BaseSimpleCPU::skipCount()
+{
+    // seconNoCountMode == true  → skip secon, secoff, AND everything between
+    // seconNoCountMode == false → skip only the secon/secoff instructions
+    const std::string &mn = curStaticInst->getName();
+    if (mn == "secon") {
+        if (m_seconNoCountMode)
+            m_ignoringCount = true;
+        return true;
+    }
+    if (mn == "secoff") {
+        if (m_seconNoCountMode)
+            m_ignoringCount = false;
+        return true;
+    }
+    return m_ignoringCount ||
+           (m_dupRegNoCount && touchesDupRegs(curStaticInst));
+}
+
 void
 BaseSimpleCPU::countInst()
 {
     SimpleExecContext& t_info = *threadInfo[curThread];
 
-    // Handle secon/secoff region markers.
-    // seconNoCountMode == true  → skip secon, secoff, AND everything between
-    // seconNoCountMode == false → skip only the secon/secoff instructions
-    std::string mn = curStaticInst->getName();
-    if (mn == "secon")
-    {
-        if (m_seconNoCountMode)
-            m_ignoringCount = true;
-        return;
-    }
-    else if (mn == "secoff")
-    {
-        if (m_seconNoCountMode)
-            m_ignoringCount = false;
-        return;
-    }
-    else if (m_ignoringCount)
+    if (skipCount())
         return;
 
     if (!curStaticInst->isMicroop() || curStaticInst->isLastMicroop()) {
@@ -185,20 +191,7 @@ BaseSimpleCPU::countFetchInst()
 {
     SimpleExecContext& t_info = *threadInfo[curThread];
 
-    std::string mn = curStaticInst->getName();
-    if (mn == "secon")
-    {
-        if (m_seconNoCountMode)
-            m_ignoringCount = true;
-        return;
-    }
-    else if (mn == "secoff")
-    {
-        if (m_seconNoCountMode)
-            m_ignoringCount = false;
-        return;
-    }
-    else if (m_ignoringCount)
+    if (skipCount())
         return;
 
     if (!curStaticInst->isMicroop() || curStaticInst->isLastMicroop()) {
@@ -213,21 +206,8 @@ void
 BaseSimpleCPU::countCommitInst()
 {
     SimpleExecContext& t_info = *threadInfo[curThread];
-    
-    std::string mn = curStaticInst->getName();
-    if (mn == "secon")
-    {
-        if (m_seconNoCountMode)
-            m_ignoringCount = true;
-        return;
-    }
-    else if (mn == "secoff")
-    {
-        if (m_seconNoCountMode)
-            m_ignoringCount = false;
-        return;
-    }
-    else if (m_ignoringCount)
+
+    if (skipCount())
         return;
 
     if (!curStaticInst->isMicroop() || curStaticInst->isLastMicroop()) {

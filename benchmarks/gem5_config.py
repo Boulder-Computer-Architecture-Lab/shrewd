@@ -65,8 +65,21 @@ parser.add_argument("--diva-policy", default="Marked",
                     help="Which instructions the Diva checker verifies")
 parser.add_argument("--diva-width", type=int, default=2,
                     help="Diva checks started per cycle")
-parser.add_argument("--diva-latency", type=int, default=4,
-                    help="Cycles from completion until a Diva check is done")
+parser.add_argument("--diva-latency-scale", type=int, default=1,
+                    help="Multiplies every Diva check latency (default 1: "
+                         "the checked unit's latency + 1, at least 2)")
+parser.add_argument("--protect-domain-only", action="store_true",
+                    help="Default-on and AVF-guided protection cover only "
+                         "ALU instructions with a destination register")
+parser.add_argument("--avf-interval", type=int, default=0,
+                    help="AVF monitor interval in committed instructions "
+                         "(writes <cpu>.shaft_avf.csv; 0 disables)")
+parser.add_argument("--avf-schedule", default=None,
+                    help="AVF-guided protection: file of the intervals to "
+                         "protect (needs --avf-interval)")
+parser.add_argument("--dup-reg-no-count", action="store_true",
+                    help="Software-duplicate binaries: instructions on "
+                         "x31/f31 are not counted")
 parser.add_argument("--shadow-policy", default="SpatialWait",
                     choices=["Opportunistic", "SpatialWait", "Temporal", "Hybrid"],
                     help="What a protected inst does when no partner FU is free")
@@ -153,6 +166,13 @@ board.set_se_binary_workload(
 # (<cpu>.shaft_pcs.csv), used to estimate the run's SDC coverage.
 for core in processor._switchable_cores["switch"]:
     core.core.shaftCommitLog = True
+    core.core.avfInterval = args.avf_interval
+    if args.avf_schedule:
+        core.core.avfSchedule = str(Path(args.avf_schedule).resolve())
+    core.core.shaftDomainOnly = args.protect_domain_only
+    core.core.dupRegNoCount = args.dup_reg_no_count
+for core in processor._switchable_cores["start"]:
+    core.core.dupRegNoCount = args.dup_reg_no_count
     if args.stuck_fu:
         op_class, _, n = args.stuck_fu.partition(":")
         core.core.stuckFuOpClass = op_class
@@ -177,7 +197,7 @@ else:
         core.core.shaftMechanism = args.mechanism
         core.core.divaPolicy = args.diva_policy
         core.core.divaWidth = args.diva_width
-        core.core.divaLatency = args.diva_latency
+        core.core.divaLatencyScale = args.diva_latency_scale
         core.core.priorityToShadow = True
         if args.legacy_shadow:
             core.core.shadowPolicy = "Opportunistic"

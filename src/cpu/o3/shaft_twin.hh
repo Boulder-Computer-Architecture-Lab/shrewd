@@ -3,6 +3,7 @@
 
 #include <string>
 
+#include "cpu/o3/fu_pool.hh"
 #include "cpu/static_inst.hh"
 
 namespace gem5
@@ -19,6 +20,20 @@ isShaftMarker(const StaticInstPtr &si)
         return false;
     const std::string name = si->getName();
     return name == "secon" || name == "secoff";
+}
+
+/**
+ * The fault model the instruction selections come from: an ALU instruction
+ * with a destination register (the injection campaign flips a bit of its
+ * result). Default-on and AVF-guided protection can be restricted to these,
+ * so they protect the same kind of instructions markers select.
+ */
+inline bool
+inShaftDomain(const StaticInstPtr &si)
+{
+    return !si->isMemRef() && !si->isControl() && !si->isNop() &&
+           si->numDestRegs() > 0 &&
+           FUPool::hasShadowCapability(si->opClass());
 }
 
 /**

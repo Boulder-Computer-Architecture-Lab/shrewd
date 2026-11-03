@@ -44,6 +44,7 @@
 #include <queue>
 #include <string>
 #include <unordered_map>
+#include <vector>
 
 #include "base/statistics.hh"
 #include "cpu/exetrace.hh"
@@ -390,17 +391,75 @@ class Commit
     std::unordered_map<Addr, ShaftPcCount> shaftPcCounts;
 
     /**
-     * Diva mechanism: a timing model of an in-order commit-stage checker.
-     * It starts divaWidth checks per cycle in program order; a check is
-     * done divaLatency cycles after the instruction completed (plus
-     * divaLoadLatency for a load's cache re-read), and the instruction
-     * cannot retire before.
+     * AVF monitor (Walcott et al., ISCA'07). Over intervals of avfInterval
+     * committed instructions, the AVF of the ROB, IQ and LSQ by Little's
+     * law: the residency of the instructions that commit (wrong-path ones
+     * are un-ACE) over the structure's entries times the interval's
+     * cycles. With a schedule, every instruction of a listed interval is
+     * protected (AVF-guided protection, no markers).
+     */
+    struct AvfInterval
+    {
+        uint64_t cycles;
+        uint64_t insts;
+        uint64_t domain;
+        uint64_t protectedDomain;
+        double rob;
+        double iq;
+        double lsq;
+    };
+    uint64_t avfInterval;
+    bool avfGuided = false;
+    std::vector<bool> avfSchedule;
+    std::vector<AvfInterval> avfLog;
+    uint64_t avfIndex = 0;
+    uint64_t avfInsts = 0;
+    uint64_t avfDomain = 0;
+    uint64_t avfProtected = 0;
+    uint64_t avfRobCycles = 0;
+    uint64_t avfIqCycles = 0;
+    uint64_t avfLsqCycles = 0;
+    Cycles avfStart = Cycles(0);
+    unsigned robEntries;
+    unsigned iqEntries;
+    unsigned lsqEntries;
+
+    /** Adds a committed instruction to the current interval. */
+    void avfCommit(const DynInstPtr &inst, ThreadID tid);
+
+    /** The interval so far, as a log row. */
+    AvfInterval avfCurrent() const;
+
+    /** Closes the current interval and sets the next one's protection. */
+    void avfNext(ThreadID tid);
+
+    /** Restarts the monitor (stats reset: the measured window begins). */
+    void avfReset();
+
+    /** Writes <cpu>.shaft_avf.csv: one row per interval. */
+    void dumpShaftAvfLog();
+
+    /**
+     * Diva mechanism: a timing model of an in-order commit-stage checker
+     * (Austin, MICRO'99). It starts divaWidth checks per cycle in program
+     * order; a check is done divaCheckLatency() cycles after the
+     * instruction completed, and the instruction cannot retire before.
      */
     bool divaEnabled;
     DivaPolicy divaPolicy;
     unsigned divaWidth;
-    Cycles divaLatency;
+    Cycles divaCompareLatency;
+    Cycles divaMinLatency;
     Cycles divaLoadLatency;
+    unsigned divaLatencyScale;
+
+    /**
+     * Cycles the Diva checker takes on an instruction: its computation
+     * pipeline re-executes it on a copy of its unit and compares, while the
+     * communication pipeline re-reads its registers (and a load's cache
+     * line) in parallel.
+     */
+    Cycles divaCheckLatency(const DynInstPtr &inst) const;
     /** Start slot of the last check, in 1/divaWidth cycle units. */
     uint64_t divaLastStart = 0;
 

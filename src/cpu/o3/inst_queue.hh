@@ -278,6 +278,9 @@ class InstructionQueue
      * that diagnoses the stuck unit, which is taken out of service. */
     void retireStuckFu();
 
+    /** Execution latency of an op class in this core's units. */
+    Cycles opLatency(OpClass op_class) const;
+
     /** Replays a memory instruction. It must be rescheduled first. */
     void replayMemInst(const DynInstPtr &replay_inst);
 

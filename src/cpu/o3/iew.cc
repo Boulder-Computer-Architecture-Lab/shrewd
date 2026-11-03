@@ -1015,6 +1015,7 @@ IEW::dispatchInsts(ThreadID tid)
 
 
         // Otherwise issue the instruction just fine.
+        inst->shaftIqCycle = cpu->curCycle();
         if (inst->isAtomic()) {
             DPRINTF(IEW, "[tid:%i] Issue: Memory instruction "
                     "encountered, adding to LSQ.\n", tid);

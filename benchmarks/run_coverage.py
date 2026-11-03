@@ -11,10 +11,11 @@ weighted by its held-out P(SDC):
 
 over the instructions the injection campaign covers (ALU instructions with a
 destination register). A PC's rate is that of its (source line, mnemonic)
-when the campaign measured it (build_selection_binaries.py writes the rates
-by the build's own line numbers), else that of its mnemonic; mnemonics come
-from objdump (the alias names QEMU printed, e.g. mv, fmv.d) and source lines
-from the binary's line table.
+when the campaign measured it (select_window.py writes the rates by the
+build's own line numbers), else that of its mnemonic; mnemonics come from
+objdump (the alias names QEMU printed, e.g. mv, fmv.d) and source lines from
+the binary's line table. sdc_protected weights the protected instead of the
+checked instructions (the selection's coverage, whatever the mechanism).
 
 Usage:
     python3 run_coverage.py --bench lbm RUN_DIR [RUN_DIR ...]
@@ -32,21 +33,23 @@ sys.path.insert(0, str(SCRIPT_DIR))
 from selection_coverage import OBJDUMP_ALIASES, source_file  # noqa: E402
 
 CROSS = "/opt/riscv/bin/riscv64-unknown-linux-gnu"
-SELECTION_DIR = SCRIPT_DIR / "selection_coverage"
-BUILD_LINES = SCRIPT_DIR / "selection_binaries" / "{bench}" / "lines_build.csv"
+SELECTION_DIR = SCRIPT_DIR / "selection_coverage" / "window"
+BUILD_LINES = SELECTION_DIR / "{bench}" / "lines.csv"
 
 
-def pc_instructions(binary):
-    """PC -> (mnemonic as QEMU names it, mnemonic as GCC writes it)."""
-    out = subprocess.run([f"{CROSS}-objdump", "-d", "--no-show-raw-insn",
-                          binary], capture_output=True, text=True,
-                         check=True).stdout
+def pc_instructions(binary, pcs):
+    """PC -> (mnemonic as QEMU names it, mnemonic as GCC writes it), for
+    pcs. objdump's output is streamed: whole, it is ~150 MB for parest."""
+    cmd = [f"{CROSS}-objdump", "-d", "--no-show-raw-insn", binary]
     table = {}
-    for line in out.splitlines():
-        m = re.match(r"\s*([0-9a-f]+):\s+(\S+)", line)
-        if m:
-            table[int(m.group(1), 16)] = (
-                OBJDUMP_ALIASES.get(m.group(2), m.group(2)), m.group(2))
+    with subprocess.Popen(cmd, stdout=subprocess.PIPE, text=True) as proc:
+        for line in proc.stdout:
+            m = re.match(r"\s*([0-9a-f]+):\s+(\S+)", line)
+            if m and int(m.group(1), 16) in pcs:
+                table[int(m.group(1), 16)] = (
+                    OBJDUMP_ALIASES.get(m.group(2), m.group(2)), m.group(2))
+    if proc.returncode:
+        raise subprocess.CalledProcessError(proc.returncode, cmd)
     return table
 
 
@@ -95,23 +98,36 @@ def rate_tables(bench):
     return by_mnemonic, by_line
 
 
-def coverage(run_dir, bench):
-    """Commit-log totals of one run, weighted by held-out P(SDC)."""
+def read_log(run_dir):
+    """(pc, committed, protected, checked) per PC of a run, or None."""
     logs = sorted(Path(run_dir).glob("*.shaft_pcs.csv"))
     if not logs:
         return None
     with open(logs[-1]) as f:
-        rows = [(int(r["pc"], 16), int(r["committed"]), int(r["protected"]),
+        return [(int(r["pc"], 16), int(r["committed"]), int(r["protected"]),
                  int(r["checked"])) for r in csv.DictReader(f)]
-    binary = run_binary(run_dir)
-    insts = pc_instructions(binary)
-    lines = pc_lines(binary, [pc for pc, *_ in rows])
+
+
+def pc_tables(binary, pcs):
+    """Mnemonics and source lines of pcs in binary."""
+    return pc_instructions(binary, set(pcs)), pc_lines(binary, sorted(pcs))
+
+
+def coverage(run_dir, bench, binary=None, tables=None):
+    """Commit-log totals of one run, weighted by held-out P(SDC). binary
+    defaults to the run's executable; tables (pc_tables) may be shared by
+    the runs of one binary."""
+    rows = read_log(run_dir)
+    if rows is None:
+        return None
+    insts, lines = tables or pc_tables(binary or run_binary(run_dir),
+                                       [pc for pc, *_ in rows])
     by_mnemonic, by_line = rate_tables(bench)
 
     t = dict.fromkeys(("committed", "protected", "checked",
                        "domain_committed", "domain_protected",
                        "domain_checked"), 0)
-    t["sdc_mass"] = t["sdc_covered"] = 0.0
+    t["sdc_mass"] = t["sdc_covered"] = t["sdc_protected"] = 0.0
     for pc, n, prot, chk in rows:
         t["committed"] += n
         t["protected"] += prot
@@ -126,6 +142,7 @@ def coverage(run_dir, bench):
         t["domain_checked"] += chk
         t["sdc_mass"] += n * p
         t["sdc_covered"] += chk * p
+        t["sdc_protected"] += prot * p
     return t
 
 

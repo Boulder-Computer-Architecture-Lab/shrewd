@@ -1061,6 +1061,7 @@ InstructionQueue::scheduleReadyInsts()
             }
 
             issuing_inst->setIssued();
+            issuing_inst->shaftIssueCycle = cpu->curCycle();
             ++total_issued;
 
 #if TRACING_ON
@@ -1161,6 +1162,12 @@ InstructionQueue::scheduleReadyInsts()
     } else {
         DPRINTF(IQ, "Not able to schedule any instructions.\n");
     }
+}
+
+Cycles
+InstructionQueue::opLatency(OpClass op_class) const
+{
+    return fuPool->getOpLatency(op_class);
 }
 
 void

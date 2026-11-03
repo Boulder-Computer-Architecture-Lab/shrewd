@@ -453,6 +453,18 @@ class Rename
     /** DIE mechanism: protected instructions get a redundant twin. */
     bool makeShaftTwins;
 
+    /** Default-on and AVF-guided protection cover only inShaftDomain(). */
+    bool shaftDomainOnly;
+
+    /** AVF-guided protection: commit decides per interval, not markers. */
+    bool avfGuided;
+
+    /** Instructions on x31/f31 are software-duplicate code: not counted. */
+    bool dupRegNoCount;
+
+    /** Whether an instruction renamed now gets the protection bit. */
+    bool protects(const StaticInstPtr &si, ThreadID tid) const;
+
 
     /**
      * Creates the DIE twin of a renamed protected instruction: it reads the

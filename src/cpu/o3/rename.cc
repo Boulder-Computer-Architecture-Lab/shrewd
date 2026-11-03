@@ -49,6 +49,7 @@
 #include "cpu/o3/limits.hh"
 #include "cpu/o3/shaft_twin.hh"
 #include "cpu/reg_class.hh"
+#include "cpu/shaft_dup.hh"
 #include "debug/Activity.hh"
 #include "debug/O3PipeView.hh"
 #include "debug/Rename.hh"
@@ -71,6 +72,9 @@ Rename::Rename(CPU *_cpu, const BaseO3CPUParams &params)
             faultInjectionWindow(params.faultInjectionWindow),
       makeShaftTwins(params.enableShrewd &&
                      params.shaftMechanism == ShaftMechanism::Die),
+      shaftDomainOnly(params.shaftDomainOnly),
+      avfGuided(!params.avfSchedule.empty()),
+      dupRegNoCount(params.dupRegNoCount),
             rng(Random::genRandom()),
       numThreads(params.numThreads),
       stats(_cpu)
@@ -672,7 +676,7 @@ Rename::renameInsts(ThreadID tid)
         // needs a second ROB/IQ entry and rename slot. Markers are not
         // eligible, so the mode in force is the instruction's own.
         const bool make_twin = makeShaftTwins &&
-            (cpu->thread[tid]->protectionFlag || shrewdDefaultOn) &&
+            protects(inst->staticInst, tid) &&
             shaftTwinEligible(inst->staticInst);
         const int entries_needed = isShaftMarker(inst->staticInst) ? 0 :
             make_twin ? 2 : 1;
@@ -833,11 +837,12 @@ Rename::renameInsts(ThreadID tid)
         }
 
         
-        if (is_sec_ctrl || cpu->thread[tid]->noCommitCountFlag) {
+        if (is_sec_ctrl || cpu->thread[tid]->noCommitCountFlag ||
+                (dupRegNoCount && touchesDupRegs(inst->staticInst))) {
             inst->noCommitCount_ = true;
         }
 
-        inst->protected_ = cpu->thread[tid]->protectionFlag;
+        inst->protected_ = protects(inst->staticInst, tid);
         inst->faultInjectActive_ = cpu->thread[tid]->faultInjectActive;
         inst->faultInjectCount_ = cpu->thread[tid]->faultInjectCount;
         inst->faultInjectTarget_ = cpu->thread[tid]->faultInjectTarget;
@@ -912,6 +917,14 @@ Rename::renameInsts(ThreadID tid)
         block(tid);
         toDecode->renameUnblock[tid] = false;
     }
+}
+
+bool
+Rename::protects(const StaticInstPtr &si, ThreadID tid) const
+{
+    const bool on = avfGuided ? cpu->thread[tid]->avfProtect :
+                    cpu->thread[tid]->protectionFlag || shrewdDefaultOn;
+    return on && (!shaftDomainOnly || inShaftDomain(si));
 }
 
 DynInstPtr

@@ -99,6 +99,10 @@ class ThreadState : public gem5::ThreadState
     // MISCREG_PROTECTION CSR for squash recovery.
     bool committedProtectionFlag = false;
 
+    // AVF-guided protection: whether the current interval is protected.
+    // Set by commit at interval boundaries, read by rename.
+    bool avfProtect = false;
+
     // Microarchitectural no-count flag used for speculation
     bool noCommitCountFlag = false;
 

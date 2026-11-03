@@ -96,6 +96,10 @@ class BaseSimpleCPU : public BaseCPU
   public:
     bool m_ignoringCount;
     bool m_seconNoCountMode;
+    /** Software-duplication binaries: skip instructions on x31/f31. */
+    bool m_dupRegNoCount;
+    /** Whether countInst() and friends skip the current instruction. */
+    bool skipCount();
     trace::InstRecord *traceData;
     CheckerCPU *checker;
 

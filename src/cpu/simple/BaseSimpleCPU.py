@@ -44,3 +44,8 @@ class BaseSimpleCPU(BaseCPU):
         "secoff, and everything between). When false, only the secon/secoff "
         "instructions themselves are skipped.",
     )
+    dupRegNoCount = Param.Bool(
+        False,
+        "Instructions that read or write x31 or f31 (reserved for software "
+        "duplication) are not counted",
+    )

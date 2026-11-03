@@ -41,6 +41,7 @@
 
 #include "cpu/o3/commit.hh"
 #include <algorithm>
+#include <fstream>
 #include <set>
 #include <string>
 #include "base/compiler.hh"
@@ -53,6 +54,7 @@
 #include "cpu/o3/cpu.hh"
 #include "cpu/o3/dyn_inst.hh"
 #include "cpu/o3/limits.hh"
+#include "cpu/o3/shaft_twin.hh"
 #include "cpu/o3/thread_state.hh"
 #include "cpu/timebuf.hh"
 #include "debug/Activity.hh"
@@ -91,8 +93,14 @@ Commit::Commit(CPU *_cpu, const BaseO3CPUParams &params)
                   params.shaftMechanism == ShaftMechanism::Diva),
       divaPolicy(params.divaPolicy),
       divaWidth(params.divaWidth),
-      divaLatency(params.divaLatency),
+      divaCompareLatency(params.divaCompareLatency),
+      divaMinLatency(params.divaMinLatency),
       divaLoadLatency(params.divaLoadLatency),
+      divaLatencyScale(params.divaLatencyScale),
+      avfInterval(params.avfInterval),
+      robEntries(params.numROBEntries),
+      iqEntries(params.numIQEntries),
+      lsqEntries(params.LQEntries + params.SQEntries),
       iewToCommitDelay(params.iewToCommitDelay),
       commitToIEWDelay(params.commitToIEWDelay),
       renameToROBDelay(params.renameToROBDelay),
@@ -145,6 +153,26 @@ Commit::Commit(CPU *_cpu, const BaseO3CPUParams &params)
         statistics::registerResetCallback([this]() { shaftPcCounts.clear(); });
         statistics::registerDumpCallback([this]() { dumpShaftCommitLog(); });
     }
+
+    if (!params.avfSchedule.empty()) {
+        if (!avfInterval)
+            fatal("avfSchedule needs avfInterval > 0\n");
+        std::ifstream schedule(params.avfSchedule);
+        if (!schedule)
+            fatal("Cannot open AVF schedule %s\n", params.avfSchedule);
+        uint64_t index;
+        while (schedule >> index) {
+            if (index >= avfSchedule.size())
+                avfSchedule.resize(index + 1, false);
+            avfSchedule[index] = true;
+        }
+        avfGuided = true;
+    }
+    if (avfInterval) {
+        // Intervals are counted from the start of the measured window.
+        statistics::registerResetCallback([this]() { avfReset(); });
+        statistics::registerDumpCallback([this]() { dumpShaftAvfLog(); });
+    }
 }
 
 std::string Commit::name() const { return cpu->name() + ".commit"; }
@@ -187,6 +215,100 @@ Commit::logShaftCommit(const DynInstPtr &inst)
         if (inst->shaftChecked())
             ++count.checked;
     }
+}
+
+Cycles
+Commit::divaCheckLatency(const DynInstPtr &inst) const
+{
+    const Cycles unit = iewStage->getInstQueue()->opLatency(inst->opClass());
+    Cycles latency = std::max(divaMinLatency,
+                              Cycles(unit + divaCompareLatency));
+    if (inst->isLoad())
+        latency = std::max(latency, Cycles(1 + divaLoadLatency));
+    return Cycles(latency * divaLatencyScale);
+}
+
+void
+Commit::avfCommit(const DynInstPtr &inst, ThreadID tid)
+{
+    // Only the program's own instructions carry ACE state: not DIE twins,
+    // software-duplicate code or markers.
+    if (inst->noCommitCount_ || inst->isShaftTwin_)
+        return;
+
+    const Cycles now = cpu->curCycle();
+    avfRobCycles += now - inst->shaftRobCycle;
+    if (inst->shaftIssueCycle > inst->shaftIqCycle)
+        avfIqCycles += inst->shaftIssueCycle - inst->shaftIqCycle;
+    if (inst->isMemRef())
+        avfLsqCycles += now - inst->shaftIqCycle;
+    ++avfInsts;
+    if (inShaftDomain(inst->staticInst)) {
+        ++avfDomain;
+        avfProtected += inst->protected_;
+    }
+    if (avfInsts == avfInterval)
+        avfNext(tid);
+}
+
+Commit::AvfInterval
+Commit::avfCurrent() const
+{
+    const uint64_t cycles = cpu->curCycle() - avfStart;
+    const double span = std::max<uint64_t>(cycles, 1);
+    return {cycles, avfInsts, avfDomain, avfProtected,
+            avfRobCycles / (robEntries * span),
+            avfIqCycles / (iqEntries * span),
+            avfLsqCycles / (lsqEntries * span)};
+}
+
+void
+Commit::avfNext(ThreadID tid)
+{
+    avfLog.push_back(avfCurrent());
+    ++avfIndex;
+    avfInsts = avfDomain = avfProtected = 0;
+    avfRobCycles = avfIqCycles = avfLsqCycles = 0;
+    avfStart = cpu->curCycle();
+    if (avfGuided) {
+        thread[tid]->avfProtect =
+            avfIndex < avfSchedule.size() && avfSchedule[avfIndex];
+    }
+}
+
+void
+Commit::avfReset()
+{
+    avfLog.clear();
+    avfIndex = 0;
+    avfInsts = avfDomain = avfProtected = 0;
+    avfRobCycles = avfIqCycles = avfLsqCycles = 0;
+    avfStart = cpu->curCycle();
+    if (avfGuided) {
+        for (ThreadID tid = 0; tid < numThreads; tid++) {
+            thread[tid]->avfProtect =
+                !avfSchedule.empty() && avfSchedule[0];
+        }
+    }
+}
+
+void
+Commit::dumpShaftAvfLog()
+{
+    OutputStream *file = simout.create(cpu->name() + ".shaft_avf.csv");
+    std::ostream &os = *file->stream();
+    os << "interval,cycles,insts,domain,protected,avf_rob,avf_iq,avf_lsq\n";
+    auto row = [&os](uint64_t index, const AvfInterval &r) {
+        os << index << ',' << r.cycles << ',' << r.insts << ',' << r.domain
+           << ',' << r.protectedDomain << ',' << r.rob << ',' << r.iq << ','
+           << r.lsq << '\n';
+    };
+    for (uint64_t i = 0; i < avfLog.size(); i++)
+        row(i, avfLog[i]);
+    // The window's last, partial interval.
+    if (avfInsts)
+        row(avfLog.size(), avfCurrent());
+    simout.close(file);
 }
 
 void
@@ -1115,7 +1237,7 @@ Commit::commitInsts()
             // Diva: a checked instruction retires only once the checker has
             // verified it. Its check starts at the later of its completion
             // and the slot after the previous check (divaWidth per cycle,
-            // in program order), and is done divaLatency later.
+            // in program order), and is done divaCheckLatency() later.
             if (divaEnabled && head_inst->getFault() == NoFault &&
                     divaNeedsCheck(head_inst, tid)) {
                 if (!head_inst->divaChecked_) {
@@ -1123,8 +1245,8 @@ Commit::commitInsts()
                         uint64_t(head_inst->shaftCompleteCycle) * divaWidth;
                     divaLastStart = std::max(ready, divaLastStart + 1);
                     head_inst->divaDoneCycle =
-                        Cycles(divaLastStart / divaWidth) + divaLatency +
-                        (head_inst->isLoad() ? divaLoadLatency : Cycles(0));
+                        Cycles(divaLastStart / divaWidth) +
+                        divaCheckLatency(head_inst);
                     head_inst->divaChecked_ = true;
                     ++stats.divaChecked;
                 }
@@ -1186,6 +1308,8 @@ Commit::commitInsts()
                 }
                 if (shaftCommitLog)
                     logShaftCommit(head_inst);
+                if (avfInterval)
+                    avfCommit(head_inst, tid);
 
                 // Keep the architectural copy current (switch-out,
                 // checkpoints): it mirrors whichever region the
@@ -1536,6 +1660,7 @@ Commit::getInsts()
                     tid, inst->seqNum, inst->pcState());
 
             rob->insertInst(inst);
+            inst->shaftRobCycle = cpu->curCycle();
 
             assert(rob->getThreadEntries(tid) <= rob->getMaxEntries(tid));
 

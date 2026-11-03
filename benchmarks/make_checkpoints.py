@@ -3,7 +3,7 @@ Take SimPoint checkpoints for one binary in a single ATOMIC fast-forward.
 
 For each SimPoint interval it saves a checkpoint WARMUP instructions before
 the interval starts, counted exactly like gem5_config.py (secon/secoff, and
-whole SW-duplicate regions with --secon-no-count, are not counted). A run
+software-duplicate code with --dup-reg-no-count, are not counted). A run
 then restores, warms the caches in ATOMIC mode and switches to O3 right at
 the interval start (gem5_config.py --checkpoint).
 
@@ -14,7 +14,7 @@ restore; there are no caches here, which makes the fast-forward much faster
 Usage (invoked by gem5.opt):
     gem5.opt -d <outdir> make_checkpoints.py --binary <path> \
         --simpoint-intervals 15,6,231 [--warmup-insts 50000000] \
-        [--secon-no-count] [--stdin <file>] [--benchmark-args ...]
+        [--dup-reg-no-count] [--stdin <file>] [--benchmark-args ...]
 
 Writes <outdir>/simpoint_<N>/ (a gem5 checkpoint plus shaft_meta.json).
 """
@@ -51,6 +51,9 @@ parser.add_argument("--warmup-insts", type=int, default=50_000_000,
 parser.add_argument("--stdin", default=None, help="Path to stdin input file")
 parser.add_argument("--secon-no-count", action="store_true",
                     help="secon/secoff delimit uncounted SW-duplicate regions")
+parser.add_argument("--dup-reg-no-count", action="store_true",
+                    help="instructions on x31/f31 are uncounted "
+                         "software-duplicate code")
 args, benchmark_args = parser.parse_known_args()
 
 if benchmark_args and benchmark_args[0] == "--benchmark-args":
@@ -89,8 +92,10 @@ board.set_se_binary_workload(
 # Count instructions the same way as gem5_config.py.
 for core in processor._switchable_cores["start"]:
     core.core.seconNoCountMode = args.secon_no_count
+    core.core.dupRegNoCount = args.dup_reg_no_count
 for core in processor._switchable_cores["switch"]:
     core.core.seconNoCountMode = args.secon_no_count
+    core.core.dupRegNoCount = args.dup_reg_no_count
 
 outdir = Path(m5.options.outdir)
 
@@ -107,6 +112,7 @@ def take_checkpoints():
             "checkpoint_insts": count,
             "warmup_insts": interval * args.interval_size - count,
             "secon_no_count": args.secon_no_count,
+            "dup_reg_no_count": args.dup_reg_no_count,
         }
         (path / "shaft_meta.json").write_text(json.dumps(meta, indent=2))
         print(f"Saved {path} at {count:,} instructions")
