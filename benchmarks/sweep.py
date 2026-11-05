@@ -24,6 +24,12 @@ Experiments (default: all):
     EF  FT-GMRES (whole program): the developer's annotation of the reliable
         part (its ALU instructions, or the whole region) vs S at its budget
         vs AVF-guided protection at its share
+    EC  coalesced markers: the S binaries with regions merged across short
+        straight-line gaps (fewer markers, the gaps' ALU instructions
+        checked too), under every mechanism but software duplication
+    EL  code-layout controls: the unprotected binary with N unexecuted
+        bytes in front of its code (same instructions, shifted addresses),
+        the noise band for every overhead
 Each marker binary also runs with --markers-only (markers executed, nothing
 checked), which splits its overhead into the markers' and the mechanism's.
 
@@ -38,6 +44,11 @@ and ft11 reserved, otherwise identical code):
     S<L>, R<L> markers around the S or R selection of L% of the window's
                ALU instructions (select_window.py)
     Sdup<L>    software duplication of the S selection
+    S<L>k<K>   S<L> with regions merged across gaps of at most K straight-line
+               instructions (selection_binaries_coalesced/,
+               build_coalesced_binaries.py)
+    pad<N>     lbase relinked with N bytes in front of the code
+               (selection_binaries_layout/, build_layout_variants.py)
 FT-GMRES (ftgmres/): none, annotated, S.
 
 Layout: <checkpoints>/<bench>/<binary>/simpoint_<N>/ and
@@ -63,6 +74,8 @@ GEM5_CONFIG = SCRIPT_DIR / "gem5_config.py"
 GEM5_WHOLE = SCRIPT_DIR / "gem5_config_o3_only.py"
 MAKE_CHECKPOINTS = SCRIPT_DIR / "make_checkpoints.py"
 SELECTION_BINARIES = SCRIPT_DIR / "selection_binaries"
+COALESCED_BINARIES = SCRIPT_DIR / "selection_binaries_coalesced"
+LAYOUT_BINARIES = SCRIPT_DIR / "selection_binaries_layout"
 FTGMRES_DIR = SCRIPT_DIR / "ftgmres"
 
 BENCHMARKS = ["bwaves", "cactuBSSN", "lbm", "nab", "namd", "parest",
@@ -84,6 +97,11 @@ MEM_GB = {"bwaves": 1.3, "cactuBSSN": 1.3, "lbm": 0.7, "nab": 0.7,
 
 # Protection levels: shares (%) of the window's ALU instructions.
 LEVELS = (10, 25, 50, 75)
+# Coalesced markers (EC): regions merged across gaps of at most this many
+# straight-line instructions.
+COALESCE_GAP = 2
+# Layout controls (EL): bytes in front of the code.
+LAYOUT_PADS = (2, 6, 16, 40)
 # AVF monitor interval, in committed instructions.
 AVF_INTERVAL = 100_000
 
@@ -105,7 +123,15 @@ def binary(bench, key):
     if key == "lbase":
         return Binary(SELECTION_BINARIES / bench / "baseline" /
                       f"{stem}.baseline.riscv", spec_run, stdin, False)
-    sel, dup, level = re.fullmatch(r"([SR])(dup)?(\d+)", key).groups()
+    if key.startswith("pad"):
+        return Binary(LAYOUT_BINARIES / bench / key /
+                      f"{stem}.baseline.riscv", spec_run, stdin, False)
+    sel, dup, level, gap = re.fullmatch(r"([SR])(dup)?(\d+)(?:k(\d+))?",
+                                        key).groups()
+    if gap:
+        return Binary(COALESCED_BINARIES / bench /
+                      f"{sel}_{level}pct_k{gap}" /
+                      f"{stem}.secon_secoff.riscv", spec_run, stdin, False)
     mode = "duplicate" if dup else "secon_secoff"
     return Binary(SELECTION_BINARIES / bench / f"{sel}_{level}pct" /
                   f"{stem}.{mode}.riscv", spec_run, stdin, bool(dup))
@@ -141,14 +167,19 @@ def family_base(key):
     return "none_base" if key in ("none", "annotated", "S") else "lbase_base"
 
 
-def run_config(key, mech, every=False, stuck=None, avf=None, alu=False):
+def run_config(key, mech, every=False, stuck=None, avf=None, alu=False,
+               domain=False):
     """Binary <key> under <mech>; every: protect every ALU instruction;
     avf: protect the intervals of highest AVF holding that share of them;
     alu: of the marked instructions, only the ALU ones (FT-GMRES's
     annotation marks whole regions, loads, stores and branches included);
+    domain: the same without a name suffix (coalesced regions, whose gaps
+    may hold loads and stores);
     stuck: a permanently faulty unit of that op class."""
     args = mechanism(mech)
     name = f"{key}_{mech}"
+    if domain:
+        args = args + ["--protect-domain-only"]
     if every:
         args = args + ["--shrewd-default-on", "--protect-domain-only"]
         name = f"{key}_all_{mech}"
@@ -203,6 +234,12 @@ EXPERIMENTS = {
              for m in SHARING + ("diva_w1", "diva_w2")]
           + [run_config("annotated", m, stuck="FloatAdd")
              for m in ("markers",) + SHARING + ("diva_w2",)],
+    "EC": [run_config("lbase", "base")]
+          + [run_config(f"S{lvl}k{COALESCE_GAP}", m, domain=True)
+             for lvl in LEVELS
+             for m in ("markers",) + SHARING + ("diva_w1", "diva_w2")],
+    "EL": [run_config("lbase", "base")]
+          + [run_config(f"pad{n}", "base") for n in LAYOUT_PADS],
 }
 
 Run = namedtuple("Run", "config bench interval weight")
@@ -306,10 +343,14 @@ def execute(tasks, args):
         task["done"](info)
         seen[task["bench"]] = max(seen[task["bench"]],
                                   usage.ru_maxrss / 2**20)
-        ok += proc.returncode == 0
-        failed += proc.returncode != 0
-        print(f"[{ok + failed}/{len(tasks)}] {task['name']}: "
-              f"{'ok' if proc.returncode == 0 else f'FAILED rc={proc.returncode}'}"
+        good = proc.returncode == 0 or bool(info.get("crash"))
+        ok += good
+        failed += not good
+        status = ("ok" if proc.returncode == 0 else
+                  f"program crashed ({info['crash']})" if good else
+                  f"FAILED rc={proc.returncode}"
+                  + (f": {info['error']}" if info.get("error") else ""))
+        print(f"[{ok + failed}/{len(tasks)}] {task['name']}: {status}"
               f" {info['elapsed_s']}s {usage.ru_maxrss / 2**20:.2f}GB",
               flush=True)
     return failed
@@ -382,11 +423,54 @@ def cmd_checkpoints(args, runs):
     return execute(tasks, args)
 
 
-def is_done(out):
+# gem5 SE panics when the simulated program itself faults (a wild address,
+# an illegal instruction). Under a stuck unit that is the program crashing on
+# its corrupted results, an outcome rather than a failed run.
+GUEST_CRASH = re.compile(r"panic: (Page table fault when accessing virtual "
+                         r"address \S+|Fault \S+ encountered at pc .*|"
+                         r"(?:Illegal|Unknown) instruction .*)")
+GEM5_ERROR = re.compile(r"(?:panic|fatal|Error): .*")
+
+
+def run_info(out):
     try:
-        return json.loads((out / "done.json").read_text())["rc"] == 0
-    except (OSError, ValueError, KeyError):
-        return False
+        return json.loads((out / "done.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def is_done(out):
+    info = run_info(out)
+    if (info.get("rc", 0) != 0 and "classified" not in info and
+            "_stuck" in out.parent.name):
+        # A run that failed before guest crashes were recognized.
+        failure(info, out, True)
+        info["classified"] = True
+        (out / "done.json").write_text(json.dumps(info))
+    return info.get("rc") == 0 or bool(info.get("crash"))
+
+
+def is_crash(out):
+    return bool(run_info(out).get("crash"))
+
+
+def failure(info, out, stuck):
+    """Mark a failed run's info: the guest crash it records (stuck units
+    only), or gem5's last error line."""
+    info["classified"] = True
+    if info["rc"] == 0:
+        return
+    try:
+        err = (out / "simerr.txt").read_text(errors="replace")
+    except OSError:
+        return
+    crash = GUEST_CRASH.search(err) if stuck else None
+    if crash:
+        info["crash"] = crash.group(1)
+    else:
+        errors = GEM5_ERROR.findall(err)
+        if errors:
+            info["error"] = errors[-1][:300]
 
 
 def schedule_path(args, run):
@@ -467,7 +551,8 @@ def cmd_run(args, runs):
             write_schedule(trace, run.config.avf, schedule_path(args, run))
         cmd, cwd = run_command(args, run, out)
 
-        def done(info, out=out):
+        def done(info, out=out, stuck="_stuck" in run.config.name):
+            failure(info, out, stuck)
             (out / "done.json").write_text(json.dumps(info))
 
         point = "full" if run.interval is None else \
@@ -570,7 +655,7 @@ def run_coverages(args, runs):
     by_binary = defaultdict(list)
     for run in runs:
         out = run_path(args, run)
-        if run.bench != FTGMRES and is_done(out):
+        if run.bench != FTGMRES and is_done(out) and not is_crash(out):
             by_binary[(binary(run.bench, run.config.binary).path,
                        run.bench)].append(out)
     totals = {}
@@ -594,11 +679,19 @@ def cmd_collect(args, runs):
     rows = []
     for run in runs:
         out = run_path(args, run)
-        if not is_done(out) or not (out / "stats.txt").exists():
+        if not is_done(out):
             continue
         row = {"config": run.config.name, "base": run.config.base,
                "bench": run.bench, "interval": run.interval,
                "weight": run.weight}
+        info = run_info(out)
+        if info.get("crash"):
+            # No statistics: gem5 stopped at the program's fault.
+            rows.append({**row, "crashed": 1, "crash": info["crash"],
+                         "host_seconds": info["elapsed_s"]})
+            continue
+        if not (out / "stats.txt").exists():
+            continue
         row.update(read_stats(out / "stats.txt"))
         if run.bench == FTGMRES:
             output = re.search(r"status=\S+ outer=\d+ inner_failures=\d+ "
@@ -629,7 +722,8 @@ def cmd_collect(args, runs):
     # family's unprotected binary on the same SimPoints.
     groups = defaultdict(list)
     for r in rows:
-        groups[(r["config"], r["bench"])].append(r)
+        if not r.get("crashed"):
+            groups[(r["config"], r["bench"])].append(r)
     summary = []
     for (config, bench), rs in sorted(groups.items()):
         base = {r["interval"]: r for r in groups.get((rs[0]["base"], bench),
