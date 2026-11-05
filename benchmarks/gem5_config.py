@@ -171,12 +171,12 @@ for core in processor._switchable_cores["switch"]:
         core.core.avfSchedule = str(Path(args.avf_schedule).resolve())
     core.core.shaftDomainOnly = args.protect_domain_only
     core.core.dupRegNoCount = args.dup_reg_no_count
-for core in processor._switchable_cores["start"]:
-    core.core.dupRegNoCount = args.dup_reg_no_count
     if args.stuck_fu:
         op_class, _, n = args.stuck_fu.partition(":")
         core.core.stuckFuOpClass = op_class
         core.core.stuckFuInstance = int(n or 0)
+for core in processor._switchable_cores["start"]:
+    core.core.dupRegNoCount = args.dup_reg_no_count
 
 if args.markers_only:
     for core in processor._switchable_cores["switch"]:
