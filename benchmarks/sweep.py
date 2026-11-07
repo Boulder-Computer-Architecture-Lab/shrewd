@@ -21,9 +21,15 @@ Experiments (default: all):
     E3  spatial redundancy: the Diva checker's width (and latency) with S
         markers vs checking everything
     EP  permanent fault: a stuck FloatAdd unit under each mechanism
+    ES  the same stuck unit under software duplication of S50: whether the
+        duplicate lands on another unit is up to the scheduler (gem5 pairs
+        each original with its duplicate: commit.swDup{Pairs,Detected,
+        Undetected})
     EF  FT-GMRES (whole program): the developer's annotation of the reliable
         part (its ALU instructions, or the whole region) vs S at its budget
         vs AVF-guided protection at its share
+    EV  the same for the video encoder (videnc/, whole program): everything
+        but the motion search annotated; the stuck unit is an IntMult
     EC  coalesced markers: the S binaries with regions merged across short
         straight-line gaps (fewer markers, the gaps' ALU instructions
         checked too), under every mechanism but software duplication
@@ -49,7 +55,7 @@ and ft11 reserved, otherwise identical code):
                build_coalesced_binaries.py)
     pad<N>     lbase relinked with N bytes in front of the code
                (selection_binaries_layout/, build_layout_variants.py)
-FT-GMRES (ftgmres/): none, annotated, S.
+Whole programs (ftgmres/, videnc/): none, annotated, S.
 
 Layout: <checkpoints>/<bench>/<binary>/simpoint_<N>/ and
 <results>/<bench>/<config>/simpoint_<N>/ (FT-GMRES: .../full/), with
@@ -77,11 +83,25 @@ SELECTION_BINARIES = SCRIPT_DIR / "selection_binaries"
 COALESCED_BINARIES = SCRIPT_DIR / "selection_binaries_coalesced"
 LAYOUT_BINARIES = SCRIPT_DIR / "selection_binaries_layout"
 FTGMRES_DIR = SCRIPT_DIR / "ftgmres"
+VIDENC_DIR = SCRIPT_DIR / "videnc"
 
 BENCHMARKS = ["bwaves", "cactuBSSN", "lbm", "nab", "namd", "parest",
               "povray"]
 FTGMRES = "ftgmres"
-FTGMRES_ARGS = ["64"]
+VIDENC = "videnc"
+# Whole programs (run whole in O3, interval None): directory, arguments,
+# the experiment that runs them, and the summary line they print.
+WholeProgram = namedtuple("WholeProgram", "dir args experiment output")
+WHOLE = {
+    FTGMRES: WholeProgram(FTGMRES_DIR, ["64"], "EF",
+                          r"status=\S+ outer=\d+ inner_failures=\d+ "
+                          r"relerr=\S+"),
+    # The stream goes nowhere: gem5 runs only time it (no faults injected;
+    # campaign.py checks streams).
+    VIDENC: WholeProgram(VIDENC_DIR, ["enc", "/dev/null"], "EV",
+                         r"frames=\d+ bytes=\d+ sse=\d+ fallbacks=\d+ "
+                         r"stream=\S+ recon=\S+"),
+}
 CONFIG = dict(rc.BENCHMARK_CONFIG)
 CONFIG.setdefault("povray", {
     "spec_num": "511.povray_r",
@@ -93,7 +113,8 @@ CONFIG.setdefault("povray", {
 # Peak gem5 RSS per benchmark (GB) until a finished run of it reports its
 # own; then 1.15x the largest seen.
 MEM_GB = {"bwaves": 1.3, "cactuBSSN": 1.3, "lbm": 0.7, "nab": 0.7,
-          "namd": 0.7, "parest": 1.0, "povray": 0.6, FTGMRES: 0.5}
+          "namd": 0.7, "parest": 1.0, "povray": 0.6, FTGMRES: 0.5,
+          VIDENC: 0.5}
 
 # Protection levels: shares (%) of the window's ALU instructions.
 LEVELS = (10, 25, 50, 75)
@@ -112,9 +133,9 @@ Binary = namedtuple("Binary", "path run_dir stdin no_count")
 
 def binary(bench, key):
     """A benchmark's binary by key (see the module docstring)."""
-    if bench == FTGMRES:
-        return Binary(FTGMRES_DIR / f"ftgmres.{key}.riscv", FTGMRES_DIR,
-                      None, False)
+    if bench in WHOLE:
+        d = WHOLE[bench].dir
+        return Binary(d / f"{bench}.{key}.riscv", d, None, False)
     cfg = CONFIG[bench]
     stem = cfg["binary"][:-len(".riscv")]
     spec_run = (rc.BASELINE_DIR / cfg["spec_num"] / "run" /
@@ -204,6 +225,8 @@ DIVA = [f"diva_w{w}" for w in (1, 2, 4, 8)]
 # FT-GMRES: the annotation's share of ALU instructions (11.7%, from its
 # campaign profile), for AVF guidance at the same share.
 FTGMRES_SHARE = 12
+# The video encoder: the annotation's share (25.6%, videnc/campaign).
+VIDENC_SHARE = 26
 
 EXPERIMENTS = {
     "E1": [run_config("lbase", "base")]
@@ -223,6 +246,8 @@ EXPERIMENTS = {
     "EP": [run_config("lbase", "base")]
           + [run_config("S50", m, stuck="FloatAdd")
              for m in ("markers",) + SHARING + ("diva_w2",)],
+    "ES": [run_config("lbase", "base"),
+           run_config("Sdup50", "sw", stuck="FloatAdd")],
     "EF": [run_config("none", "base")]
           + [run_config("none", m, every=True)
              for m in SHARING + ("diva_w1", "diva_w2")]
@@ -233,6 +258,18 @@ EXPERIMENTS = {
           + [run_config("none", m, avf=FTGMRES_SHARE)
              for m in SHARING + ("diva_w1", "diva_w2")]
           + [run_config("annotated", m, stuck="FloatAdd")
+             for m in ("markers",) + SHARING + ("diva_w2",)],
+    "EV": [run_config("none", "base")]
+          + [run_config("none", m, every=True)
+             for m in SHARING + ("diva_w1", "diva_w2")]
+          + [run_config(k, m) for k in ("annotated", "S")
+             for m in ("markers",) + SHARING + ("diva_w1", "diva_w2")]
+          + [run_config("annotated", m, alu=True)
+             for m in ("markers",) + SHARING + ("diva_w1", "diva_w2")]
+          + [run_config("none", m, avf=VIDENC_SHARE)
+             for m in SHARING + ("diva_w1", "diva_w2")]
+          # Integer code: a stuck multiplier (quantization, reconstruction).
+          + [run_config("annotated", m, stuck="IntMult")
              for m in ("markers",) + SHARING + ("diva_w2",)],
     "EC": [run_config("lbase", "base")]
           + [run_config(f"S{lvl}k{COALESCE_GAP}", m, domain=True)
@@ -247,17 +284,20 @@ Run = namedtuple("Run", "config bench interval weight")
 
 def plan(exps, benches, simpoints):
     """Unique runs of the experiments (configs shared between them run
-    once). FT-GMRES runs whole (interval None) for experiment EF only."""
+    once). A whole program runs whole (interval None), for its own
+    experiment only (FT-GMRES: EF; the video encoder: EV)."""
     runs = {}
     for exp in exps:
+        whole = [b for b, w in WHOLE.items() if w.experiment == exp]
         for cfg in EXPERIMENTS[exp]:
-            if exp == "EF":
-                if FTGMRES in benches:
-                    runs.setdefault((cfg.name, FTGMRES, None),
-                                    Run(cfg, FTGMRES, None, 1.0))
+            if whole:
+                for b in whole:
+                    if b in benches:
+                        runs.setdefault((cfg.name, b, None),
+                                        Run(cfg, b, None, 1.0))
                 continue
             for bench in benches:
-                if bench == FTGMRES:
+                if bench in WHOLE:
                     continue
                 for interval, weight in simpoints.get(bench, []):
                     runs.setdefault((cfg.name, bench, interval),
@@ -426,9 +466,10 @@ def cmd_checkpoints(args, runs):
 # gem5 SE panics when the simulated program itself faults (a wild address,
 # an illegal instruction). Under a stuck unit that is the program crashing on
 # its corrupted results, an outcome rather than a failed run.
-GUEST_CRASH = re.compile(r"panic: (Page table fault when accessing virtual "
-                         r"address \S+|Fault \S+ encountered at pc .*|"
-                         r"(?:Illegal|Unknown) instruction .*)")
+# gem5 writes "panic: panic condition ... occurred: <message>".
+GUEST_CRASH = re.compile(r"panic: .*?(Page table fault when accessing "
+                         r"virtual address \S+|Fault \S+ encountered at pc "
+                         r".*|(?:Illegal|Unknown) instruction .*)")
 GEM5_ERROR = re.compile(r"(?:panic|fatal|Error): .*")
 
 
@@ -441,9 +482,9 @@ def run_info(out):
 
 def is_done(out):
     info = run_info(out)
-    if (info.get("rc", 0) != 0 and "classified" not in info and
+    if (info.get("rc", 0) != 0 and not info.get("crash") and
             "_stuck" in out.parent.name):
-        # A run that failed before guest crashes were recognized.
+        # A failed stuck-unit run: look (again) for a guest crash.
         failure(info, out, True)
         info["classified"] = True
         (out / "done.json").write_text(json.dumps(info))
@@ -463,7 +504,10 @@ def failure(info, out, stuck):
     try:
         err = (out / "simerr.txt").read_text(errors="replace")
     except OSError:
-        return
+        err = ""
+    # The error recorded when the run ended counts too: simerr.txt may since
+    # belong to a rerun (or a copy taken mid-rerun).
+    err = info.get("error", "") + "\n" + err
     crash = GUEST_CRASH.search(err) if stuck else None
     if crash:
         info["crash"] = crash.group(1)
@@ -515,7 +559,7 @@ def run_command(args, run, out):
     if run.interval is None:
         cmd = [str(args.gem5), "-re", "-d", str(out), str(GEM5_WHOLE),
                "--binary", str(b.path)] + run.config.args + avf
-        return cmd + ["--benchmark-args"] + FTGMRES_ARGS, b.run_dir
+        return cmd + ["--benchmark-args"] + WHOLE[run.bench].args, b.run_dir
     cmd = [str(args.gem5), "-re", "-d", str(out), str(GEM5_CONFIG),
            "--binary", str(b.path), "--simpoint-interval",
            str(run.interval)] + run.config.args + avf
@@ -605,6 +649,9 @@ STATS = {
     "shadow_mismatches": "iew.shrewdFaultSquashes",
     "faults_committed": "commit.faultsCommitted",
     "protected_faults_committed": "commit.protectedFaultsCommitted",
+    "sw_dup_pairs": "commit.swDupPairs",
+    "sw_dup_detected": "commit.swDupDetected",
+    "sw_dup_undetected": "commit.swDupUndetected",
     "stuck_fu_results": "stuckFuResults",
     "stuck_fu_retire_cycle": "stuckFuRetireCycle",
     "rob_full_events": "rename.ROBFullEvents",
@@ -655,7 +702,7 @@ def run_coverages(args, runs):
     by_binary = defaultdict(list)
     for run in runs:
         out = run_path(args, run)
-        if run.bench != FTGMRES and is_done(out) and not is_crash(out):
+        if run.bench not in WHOLE and is_done(out) and not is_crash(out):
             by_binary[(binary(run.bench, run.config.binary).path,
                        run.bench)].append(out)
     totals = {}
@@ -693,9 +740,8 @@ def cmd_collect(args, runs):
         if not (out / "stats.txt").exists():
             continue
         row.update(read_stats(out / "stats.txt"))
-        if run.bench == FTGMRES:
-            output = re.search(r"status=\S+ outer=\d+ inner_failures=\d+ "
-                               r"relerr=\S+",
+        if run.bench in WHOLE:
+            output = re.search(WHOLE[run.bench].output,
                                (out / "simout.txt").read_text())
             row["output"] = output.group(0) if output else ""
         else:
@@ -781,7 +827,7 @@ def main():
     parser.add_argument("experiments", nargs="*",
                         help=f"Default: all ({', '.join(EXPERIMENTS)})")
     parser.add_argument("--benchmarks",
-                        default=",".join(BENCHMARKS + [FTGMRES]))
+                        default=",".join(BENCHMARKS + list(WHOLE)))
     parser.add_argument("--gem5", type=Path,
                         default=rc.PROJECT_ROOT / "build" / "ALL" / "gem5.opt")
     parser.add_argument("--checkpoints", type=Path,

@@ -56,6 +56,7 @@
 #include "cpu/o3/limits.hh"
 #include "cpu/o3/shaft_twin.hh"
 #include "cpu/o3/thread_state.hh"
+#include "cpu/shaft_dup.hh"
 #include "cpu/timebuf.hh"
 #include "debug/Activity.hh"
 #include "debug/Commit.hh"
@@ -217,6 +218,45 @@ Commit::logShaftCommit(const DynInstPtr &inst)
     }
 }
 
+void
+Commit::trackSwDup(const DynInstPtr &inst, ThreadID tid)
+{
+    // A stuck unit flips the top bit of whatever it computes, the same way
+    // every time (DynInst::setRegOperand): copies that both ran on it agree
+    // and pass the binary's compare, and a pair with one corrupted copy
+    // fails it. The binaries' mismatch handler is the next instruction (they
+    // run on), so the compare's outcome is counted here.
+    SwDupTrack &t = swDup[tid];
+    const StaticInstPtr &si = inst->staticInst;
+    if (!touchesDupRegs(si)) {
+        // A program instruction: the original of a duplicate that follows.
+        t.haveOrig = true;
+        t.origOpClass = inst->opClass();
+        t.origFaulty = inst->faultInjected_;
+        t.dupSeen = false;
+        return;
+    }
+    if (si->isControl()) {
+        // The check branch on t6.
+        if (t.haveOrig && t.dupSeen) {
+            ++stats.swDupPairs;
+            if (t.origFaulty != t.dupFaulty)
+                ++stats.swDupDetected;
+            else if (t.origFaulty)
+                ++stats.swDupUndetected;
+        }
+        t.dupSeen = false;
+        return;
+    }
+    // The duplicate repeats the original's operation into t6/ft11. A
+    // source save comes before the original (which resets the pair), and
+    // an feq has another op class (or follows the duplicate).
+    if (t.haveOrig && !t.dupSeen && inst->opClass() == t.origOpClass) {
+        t.dupSeen = true;
+        t.dupFaulty = inst->faultInjected_;
+    }
+}
+
 Cycles
 Commit::divaCheckLatency(const DynInstPtr &inst) const
 {
@@ -374,6 +414,14 @@ Commit::CommitStats::CommitStats(CPU *cpu, Commit *commit)
       ADD_STAT(protectedFaultsCommitted, statistics::units::Count::get(),
                "Injected faults that retired undetected in protected "
                "instructions (the mechanism missed them)"),
+      ADD_STAT(swDupPairs, statistics::units::Count::get(),
+               "Software duplication: original/duplicate pairs checked"),
+      ADD_STAT(swDupDetected, statistics::units::Count::get(),
+               "Software duplication: pairs with exactly one corrupted "
+               "copy (the check catches them)"),
+      ADD_STAT(swDupUndetected, statistics::units::Count::get(),
+               "Software duplication: pairs with both copies corrupted "
+               "(identical corruption passes the check)"),
       ADD_STAT(protectionToggles, statistics::units::Count::get(),
                "Protection changes between consecutive committed "
                "instructions (markers a region-marked binary executes)")
@@ -1288,6 +1336,7 @@ Commit::commitInsts()
                 // commit, so these are the modes after the instruction.
                 // A DIE twin carries none of this state.
                 if (!is_twin) {
+                    trackSwDup(head_inst, tid);
                     if (!head_inst->noCommitCount_) {
                         if (head_inst->protected_ !=
                                 lastCommittedProtected[tid]) {

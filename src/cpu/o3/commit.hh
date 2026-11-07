@@ -55,6 +55,7 @@
 #include "cpu/o3/limits.hh"
 #include "cpu/o3/rename_map.hh"
 #include "cpu/o3/rob.hh"
+#include "cpu/op_class.hh"
 #include "cpu/timebuf.hh"
 #include "enums/CommitPolicy.hh"
 #include "enums/DivaPolicy.hh"
@@ -466,6 +467,26 @@ class Commit
     /** Whether the last committed instruction was protected. */
     bool lastCommittedProtected[MaxThreads] = {};
 
+    /**
+     * Software duplication under a stuck unit. A duplicated instruction
+     * commits as [save] original, duplicate (into t6/ft11), [feq], and a
+     * check branch on t6. Per thread: the last committed program
+     * instruction (one touching neither t6 nor ft11) and, after it, the
+     * duplicate of the same op class; the check scores the pair.
+     */
+    struct SwDupTrack
+    {
+        bool haveOrig = false;
+        OpClass origOpClass = No_OpClass;
+        bool origFaulty = false;
+        bool dupSeen = false;
+        bool dupFaulty = false;
+    };
+    SwDupTrack swDup[MaxThreads];
+
+    /** Track a committed instruction for the SW-duplication pairs. */
+    void trackSwDup(const DynInstPtr &inst, ThreadID tid);
+
     /** Whether the Diva checker verifies this instruction. */
     bool divaNeedsCheck(const DynInstPtr &inst, ThreadID tid);
 
@@ -630,6 +651,13 @@ class Commit
         /** Injected faults that retired undetected (escapes). */
         statistics::Scalar faultsCommitted;
         statistics::Scalar protectedFaultsCommitted;
+
+        /** Software duplication: original/duplicate pairs checked, those
+         * where exactly one copy was corrupted (the check catches it) and
+         * those where both were (identical corruption passes it). */
+        statistics::Scalar swDupPairs;
+        statistics::Scalar swDupDetected;
+        statistics::Scalar swDupUndetected;
 
         /** Protection changes between consecutive committed
          * instructions: the markers a region-marked binary executes. */
