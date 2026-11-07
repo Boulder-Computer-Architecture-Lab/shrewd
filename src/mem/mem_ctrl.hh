@@ -617,6 +617,11 @@ class MemCtrl : public qos::MemCtrl
         // per-requestor raed and write average memory access latency
         statistics::Formula requestorReadAvgLat;
         statistics::Formula requestorWriteAvgLat;
+
+        // SHAFT protected partition (mem/shaft_partition.hh)
+        statistics::Scalar protectedWriteReqs;
+        statistics::Scalar mirrorWriteBursts;
+        statistics::Scalar mirrorMergedBursts;
     };
 
     CtrlStats stats;

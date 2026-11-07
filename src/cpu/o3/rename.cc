@@ -71,7 +71,8 @@ Rename::Rename(CPU *_cpu, const BaseO3CPUParams &params)
         shrewdDefaultOn(params.shrewdDefaultOn),
             faultInjectionWindow(params.faultInjectionWindow),
       makeShaftTwins(params.enableShrewd &&
-                     params.shaftMechanism == ShaftMechanism::Die),
+                     (params.shaftMechanism == ShaftMechanism::Die ||
+                      params.shaftMechanism == ShaftMechanism::RfTwin)),
       shaftDomainOnly(params.shaftDomainOnly),
       avfGuided(!params.avfSchedule.empty()),
       dupRegNoCount(params.dupRegNoCount),
@@ -962,6 +963,9 @@ Rename::createShaftTwin(const DynInstPtr &inst, ThreadID tid)
     twin->setInstListIt(cpu->instList.insert(
             std::next(inst->getInstListIt()), twin));
     inst->shaftTwin = twin;
+    // Not owning: the primary cannot retire before its twin completes, and
+    // a squash that removes the primary removes the (younger) twin too.
+    twin->shaftPrimary = inst.get();
 
     DPRINTF(Rename, "[tid:%i] [sn:%llu] DIE twin of [sn:%llu] PC %s\n", tid,
             twin->seqNum, inst->seqNum, inst->pcState());

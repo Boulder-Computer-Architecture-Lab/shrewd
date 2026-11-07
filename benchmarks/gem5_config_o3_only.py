@@ -56,7 +56,7 @@ parser.add_argument(
     help="Accepted for compatibility; O3-only mode always runs to completion",
 )
 parser.add_argument("--mechanism", default="FuDup",
-                    choices=["FuDup", "Die", "Diva"],
+                    choices=["FuDup", "Die", "Diva", "RfTwin"],
                     help="How protected instructions are checked")
 parser.add_argument("--diva-policy", default="Marked",
                     choices=["Marked", "Kernel", "All"],
@@ -83,6 +83,15 @@ parser.add_argument("--shadow-compare-latency", type=int, default=0,
 parser.add_argument("--stuck-fu", default=None, metavar="CLASS[:N]",
                     help="Permanent fault: the N-th unit (default 0) with op "
                          "class CLASS (e.g. FloatAdd) corrupts its results")
+parser.add_argument("--partition", default="Off",
+                    choices=["Off", "Marked", "All"],
+                    help="Protected memory partition: Marked, a page "
+                         "joins it when a protected store to it commits "
+                         "and its writes are then mirrored; All, every "
+                         "write is mirrored")
+parser.add_argument("--partition-migrate-cycles", type=int, default=6000,
+                    help="Cycles commit stalls when a page moves into "
+                         "the partition")
 parser.add_argument("--markers-only", action="store_true",
                     help="Execute secon/secoff (dropped at rename) but check "
                          "nothing: the cost of the markers alone")
@@ -142,6 +151,8 @@ for core in processor.get_cores():
     if args.avf_schedule:
         sim_core.avfSchedule = str(Path(args.avf_schedule).resolve())
     sim_core.shaftDomainOnly = args.protect_domain_only
+    sim_core.shaftPartition = args.partition
+    sim_core.partitionMigrateCycles = args.partition_migrate_cycles
     if args.stuck_fu:
         op_class, _, n = args.stuck_fu.partition(":")
         sim_core.stuckFuOpClass = op_class

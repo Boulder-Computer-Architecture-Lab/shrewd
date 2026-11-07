@@ -49,6 +49,7 @@
 #include "mem/dram_interface.hh"
 #include "mem/mem_interface.hh"
 #include "mem/nvm_interface.hh"
+#include "mem/shaft_partition.hh"
 #include "sim/system.hh"
 
 namespace gem5
@@ -313,6 +314,9 @@ MemCtrl::addToWriteQueue(PacketPtr pkt, unsigned int pkt_count,
     const Addr base_addr = pkt->getAddr();
     Addr addr = base_addr;
     uint32_t burst_size = mem_intr->bytesPerBurst();
+    const bool mirror = shaftPartition().isProtected(base_addr);
+    if (mirror)
+        stats.protectedWriteReqs++;
 
     for (int cnt = 0; cnt < pkt_count; ++cnt) {
         unsigned size = std::min((addr | (burst_size - 1)) + 1,
@@ -364,6 +368,33 @@ MemCtrl::addToWriteQueue(PacketPtr pkt, unsigned int pkt_count,
             // keep track of the fact that this burst effectively
             // disappeared as it was merged with an existing one
             stats.mergedWrBursts++;
+        }
+
+        // SHAFT partition: a write to a protected frame is also written to
+        // its mirror, half the controller's range away (same channel,
+        // another row). Timing and energy only: the data is not copied.
+        if (mirror) {
+            const AddrRange &range = mem_intr->getAddrRange();
+            const Addr span = range.end() - range.start();
+            const Addr mirror_addr = range.start() +
+                (addr - range.start() + span / 2) % span;
+            if (isInWriteQueue.find(burstAlign(mirror_addr, mem_intr)) ==
+                    isInWriteQueue.end()) {
+                MemPacket* mirror_pkt = mem_intr->decodePacket(
+                    pkt, mirror_addr, size, false, mem_intr->pseudoChannel);
+                mirror_pkt->readyTime = MaxTick;
+                mem_intr->setupRank(mirror_pkt->rank, false);
+                assert(totalWriteQueueSize < writeBufferSize);
+                writeQueue[mirror_pkt->qosValue()].push_back(mirror_pkt);
+                isInWriteQueue.insert(burstAlign(mirror_addr, mem_intr));
+                logRequest(MemCtrl::WRITE, pkt->requestorId(),
+                           pkt->qosValue(), mirror_pkt->addr, 1);
+                mem_intr->writeQueueSize++;
+                assert(totalWriteQueueSize == isInWriteQueue.size());
+                stats.mirrorWriteBursts++;
+            } else {
+                stats.mirrorMergedBursts++;
+            }
         }
 
         // Starting address of next memory pkt (aligned to burst_size boundary)
@@ -441,7 +472,10 @@ MemCtrl::recvTimingReq(PacketPtr pkt)
     // check local buffers and do not accept if full
     if (pkt->isWrite()) {
         assert(size != 0);
-        if (writeQueueFull(pkt_count)) {
+        // A write to the SHAFT partition also needs room for its mirror.
+        const unsigned int entries = shaftPartition().isProtected(
+            pkt->getAddr()) ? 2 * pkt_count : pkt_count;
+        if (writeQueueFull(entries)) {
             DPRINTF(MemCtrl, "Write queue full, not accepting\n");
             // remember that we have to retry this port
             retryWrReq = true;
@@ -1271,7 +1305,13 @@ MemCtrl::CtrlStats::CtrlStats(MemCtrl &_ctrl)
              "Per-requestor read average memory access latency"),
     ADD_STAT(requestorWriteAvgLat, statistics::units::Rate<
                 statistics::units::Tick, statistics::units::Count>::get(),
-             "Per-requestor write average memory access latency")
+             "Per-requestor write average memory access latency"),
+    ADD_STAT(protectedWriteReqs, statistics::units::Count::get(),
+             "SHAFT partition: write requests to protected frames"),
+    ADD_STAT(mirrorWriteBursts, statistics::units::Count::get(),
+             "SHAFT partition: mirror write bursts added to the queue"),
+    ADD_STAT(mirrorMergedBursts, statistics::units::Count::get(),
+             "SHAFT partition: mirror write bursts merged with a queued one")
 {
 }
 

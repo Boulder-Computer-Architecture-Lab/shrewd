@@ -116,7 +116,8 @@ CPU::CPU(const BaseO3CPUParams &params)
       seconNoCountMode(params.seconNoCountMode),
       shaftArchMiscReg(params.shaftArchMiscReg),
       seqStride(params.enableShrewd &&
-                params.shaftMechanism == ShaftMechanism::Die ? 2 : 1),
+                (params.shaftMechanism == ShaftMechanism::Die ||
+                 params.shaftMechanism == ShaftMechanism::RfTwin) ? 2 : 1),
       system(params.system),
       lastRunningCycle(curCycle()),
       cpuStats(this)

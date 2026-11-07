@@ -464,6 +464,17 @@ class Commit
     /** Start slot of the last check, in 1/divaWidth cycle units. */
     uint64_t divaLastStart = 0;
 
+    /**
+     * SHAFT protected partition (mem/shaft_partition.hh): whether a
+     * committed protected store moves its page into the partition, the
+     * cycles a move takes (the operating system's minor fault and copy),
+     * and the cycle until which commit is busy with one.
+     */
+    bool partitionMarked = false;
+    bool partitionOn = false;
+    Cycles partitionMigrateCycles = Cycles(0);
+    Cycles partitionBusyUntil = Cycles(0);
+
     /** Whether the last committed instruction was protected. */
     bool lastCommittedProtected[MaxThreads] = {};
 
@@ -662,6 +673,18 @@ class Commit
         /** Protection changes between consecutive committed
          * instructions: the markers a region-marked binary executes. */
         statistics::Scalar protectionToggles;
+
+        /** DIE/RfTwin: committed loads and stores retired with a twin
+         * (CRAFT's checked stores and load-value-queue loads). */
+        statistics::Scalar dieMemTwins;
+
+        /** Protected partition: committed protected stores, pages they
+         * moved into the partition, and cycles commit spent moving. */
+        statistics::Scalar partitionStores;
+        statistics::Scalar partitionMigrations;
+        statistics::Scalar partitionStallCycles;
+        /** Distinct pages committed stores wrote (partition on). */
+        statistics::Scalar partitionWrittenPages;
     } stats;
 };
 

@@ -65,6 +65,7 @@
 #include "debug/ExecFaulting.hh"
 #include "debug/HtmCpu.hh"
 #include "debug/O3PipeView.hh"
+#include "mem/shaft_partition.hh"
 #include "params/BaseO3CPU.hh"
 #include "sim/faults.hh"
 #include "sim/full_system.hh"
@@ -123,6 +124,18 @@ Commit::Commit(CPU *_cpu, const BaseO3CPUParams &params)
 
     _status = Active;
     _nextStatus = Inactive;
+
+    // The protected partition is the memory system's: this core only
+    // turns it on (a core left Off does not turn it off).
+    if (params.shaftPartition == ShaftPartitionMode::Marked) {
+        shaftPartition().setMode(ShaftPartition::Mode::Marked);
+        partitionMarked = true;
+        partitionOn = true;
+        partitionMigrateCycles = params.partitionMigrateCycles;
+    } else if (params.shaftPartition == ShaftPartitionMode::All) {
+        shaftPartition().setMode(ShaftPartition::Mode::All);
+        partitionOn = true;
+    }
 
     if (commitPolicy == CommitPolicy::RoundRobin) {
         //Set-Up Priority List
@@ -424,7 +437,17 @@ Commit::CommitStats::CommitStats(CPU *cpu, Commit *commit)
                "(identical corruption passes the check)"),
       ADD_STAT(protectionToggles, statistics::units::Count::get(),
                "Protection changes between consecutive committed "
-               "instructions (markers a region-marked binary executes)")
+               "instructions (markers a region-marked binary executes)"),
+      ADD_STAT(dieMemTwins, statistics::units::Count::get(),
+               "Committed loads and stores retired with a twin"),
+      ADD_STAT(partitionStores, statistics::units::Count::get(),
+               "Committed protected stores (protected partition)"),
+      ADD_STAT(partitionMigrations, statistics::units::Count::get(),
+               "Pages moved into the protected partition"),
+      ADD_STAT(partitionStallCycles, statistics::units::Cycle::get(),
+               "Cycles commit stalled moving pages into the partition"),
+      ADD_STAT(partitionWrittenPages, statistics::units::Count::get(),
+               "Distinct pages written by committed stores (partition on)")
 {
     using namespace statistics;
 
@@ -1265,6 +1288,12 @@ Commit::commitInsts()
               head_inst->seqNum,
               head_inst->opClass());
         } else {
+            // Protected partition: commit is busy while the operating
+            // system moves a page a protected store wrote into it.
+            if (partitionMarked && cpu->curCycle() < partitionBusyUntil) {
+                ++stats.partitionStallCycles;
+                break;
+            }
             // DIE: a primary retires once its twin has completed too, and
             // the two results are compared. A fault in exactly one of them
             // is a mismatch: re-execute the primary from fetch (its
@@ -1337,6 +1366,32 @@ Commit::commitInsts()
                 // A DIE twin carries none of this state.
                 if (!is_twin) {
                     trackSwDup(head_inst, tid);
+                    if (head_inst->rfTwinDeferred_) {
+                        // RfTwin: its twin was squashed, so its consumers
+                        // are released here.
+                        head_inst->rfTwinDeferred_ = false;
+                        iewStage->releaseRfTwinWakeup(head_inst);
+                    }
+                    if (head_inst->isMemRef() && head_inst->shaftTwin &&
+                            !head_inst->shaftTwin->isSquashed())
+                        ++stats.dieMemTwins;
+                    // Protected partition: a protected store's page joins
+                    // it (its later write-backs are mirrored); the first
+                    // time, the page moves, and commit waits for it.
+                    if (partitionOn && head_inst->isStore() &&
+                            shaftPartition().noteWritten(
+                                head_inst->physEffAddr))
+                        ++stats.partitionWrittenPages;
+                    if (partitionMarked && head_inst->isStore() &&
+                            head_inst->protected_) {
+                        ++stats.partitionStores;
+                        if (shaftPartition().protect(
+                                head_inst->physEffAddr)) {
+                            ++stats.partitionMigrations;
+                            partitionBusyUntil = cpu->curCycle() +
+                                partitionMigrateCycles;
+                        }
+                    }
                     if (!head_inst->noCommitCount_) {
                         if (head_inst->protected_ !=
                                 lastCommittedProtected[tid]) {

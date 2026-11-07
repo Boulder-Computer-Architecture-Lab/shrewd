@@ -64,9 +64,18 @@ class CommitPolicy(ScopedEnum):
 # How protected instructions are checked: FuDup duplicates the execution on
 # a second FU (compared before broadcast); Die gives each one a redundant
 # twin with its own IQ/ROB entry and FU (compared at commit); Diva verifies
-# them in a commit-stage checker.
+# them in a commit-stage checker; RfTwin is Die with the twin writing the
+# result's check bits, which consumers verify when they read the register
+# (SwapCodes, MICRO'18): no consumer reads a result before its twin agrees.
 class ShaftMechanism(ScopedEnum):
-    vals = ["FuDup", "Die", "Diva"]
+    vals = ["FuDup", "Die", "Diva", "RfTwin"]
+
+
+# SHAFT's protected memory partition (mem/shaft_partition.hh): Off; Marked,
+# a page enters it when a protected store to it commits and its writes are
+# then mirrored; All, every write is mirrored (full memory mirroring).
+class ShaftPartitionMode(ScopedEnum):
+    vals = ["Off", "Marked", "All"]
 
 
 # Which instructions the Diva checker verifies: Marked follows the
@@ -328,6 +337,17 @@ class BaseO3CPU(BaseCPU):
     )
     stuckFuInstance = Param.Unsigned(
         0, "Which unit with stuckFuOpClass is stuck (0: the first)"
+    )
+    shaftPartition = Param.ShaftPartitionMode(
+        "Off",
+        "Protected memory partition: Marked, the first protected store to "
+        "a page moves it into a mirrored partition; All, all memory is "
+        "mirrored; Off, none",
+    )
+    partitionMigrateCycles = Param.Cycles(
+        6000,
+        "Cycles commit stalls when a protected store moves a page into the "
+        "partition (the operating system's minor fault and 4 KiB copy)",
     )
     shaftCommitLog = Param.Bool(
         False,

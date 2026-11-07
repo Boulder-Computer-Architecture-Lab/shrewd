@@ -79,6 +79,8 @@ IEW::IEW(CPU *_cpu, const BaseO3CPUParams &params)
       wbCycle(0),
       wbWidth(params.wbWidth),
     enableShrewd(params.enableShrewd),
+      rfTwin(params.enableShrewd &&
+             params.shaftMechanism == ShaftMechanism::RfTwin),
       numThreads(params.numThreads),
       iewStats(cpu)
 {
@@ -170,6 +172,12 @@ IEW::IEWStats::IEWStats(CPU *cpu)
              "Number of memory order violations"),
     ADD_STAT(shrewdFaultSquashes, statistics::units::Count::get(),
              "Number of squashes caused by Shrewd fault injection"),
+    ADD_STAT(rfTwinDeferredWakeups, statistics::units::Count::get(),
+             "RfTwin: primaries whose consumers waited for the twin"),
+    ADD_STAT(rfTwinDeferCycles, statistics::units::Cycle::get(),
+             "RfTwin: cycles consumers waited for twins"),
+    ADD_STAT(rfTwinMismatches, statistics::units::Count::get(),
+             "RfTwin: primaries whose twin disagreed (consumers not woken)"),
     ADD_STAT(predictedTakenIncorrect, statistics::units::Count::get(),
              "Number of branches that were predicted taken incorrectly"),
     ADD_STAT(predictedNotTakenIncorrect, statistics::units::Count::get(),
@@ -1465,25 +1473,70 @@ IEW::writebackInsts()
         // when it's ready to execute the strictly ordered load.
         if (!inst->isSquashed() && inst->isExecuted() &&
                 inst->getFault() == NoFault) {
-            int dependents = instQueue.wakeDependents(inst);
-
-            for (int i = 0; i < inst->numDestRegs(); i++) {
-                // Mark register as ready if not pinned
-                if (inst->renamedDestIdx(i)->
-                        getNumPinnedWritesToComplete() == 0) {
-                    DPRINTF(IEW,"Setting Destination Register %i (%s)\n",
-                            inst->renamedDestIdx(i)->index(),
-                            inst->renamedDestIdx(i)->className());
-                    scoreboard->setReg(inst->renamedDestIdx(i));
+            iewStats.writebackCount[tid]++;
+            if (!rfTwin) {
+                wakeProducer(inst);
+                continue;
+            }
+            if (inst->isShaftTwin_) {
+                // The twin's check bits are written: the primary's
+                // consumers may read its result, if the two agree.
+                DynInst *primary = inst->shaftPrimary;
+                if (primary && !primary->isSquashed()) {
+                    primary->rfTwinDone_ = true;
+                    if (primary->rfTwinDeferred_) {
+                        primary->rfTwinDeferred_ = false;
+                        iewStats.rfTwinDeferCycles += uint64_t(
+                            cpu->curCycle() - primary->rfTwinDeferCycle);
+                        if (primary->faultInjected_ != inst->faultInjected_)
+                            ++iewStats.rfTwinMismatches;
+                        else
+                            wakeProducer(DynInstPtr(primary));
+                    }
+                }
+                continue;
+            }
+            const DynInstPtr &twin = inst->shaftTwin;
+            if (twin && !twin->isSquashed() && inst->numDestRegs() > 0) {
+                if (!inst->rfTwinDone_) {
+                    // Consumers wait for the twin's check bits.
+                    inst->rfTwinDeferred_ = true;
+                    inst->rfTwinDeferCycle = cpu->curCycle();
+                    ++iewStats.rfTwinDeferredWakeups;
+                    continue;
+                }
+                if (inst->faultInjected_ != twin->faultInjected_) {
+                    // Detected before any consumer read the result; commit
+                    // re-executes the primary.
+                    ++iewStats.rfTwinMismatches;
+                    continue;
                 }
             }
-
-            if (dependents) {
-                iewStats.producerInst[tid]++;
-                iewStats.consumerInst[tid]+= dependents;
-            }
-            iewStats.writebackCount[tid]++;
+            wakeProducer(inst);
         }
+    }
+}
+
+void
+IEW::wakeProducer(const DynInstPtr &inst)
+{
+    const ThreadID tid = inst->threadNumber;
+    int dependents = instQueue.wakeDependents(inst);
+
+    for (int i = 0; i < inst->numDestRegs(); i++) {
+        // Mark register as ready if not pinned
+        if (inst->renamedDestIdx(i)->
+                getNumPinnedWritesToComplete() == 0) {
+            DPRINTF(IEW,"Setting Destination Register %i (%s)\n",
+                    inst->renamedDestIdx(i)->index(),
+                    inst->renamedDestIdx(i)->className());
+            scoreboard->setReg(inst->renamedDestIdx(i));
+        }
+    }
+
+    if (dependents) {
+        iewStats.producerInst[tid]++;
+        iewStats.consumerInst[tid]+= dependents;
     }
 }
 

@@ -171,6 +171,13 @@ class IEW
     /** Wakes all dependents of a completed instruction. */
     void wakeDependents(const DynInstPtr &inst);
 
+    /**
+     * RfTwin: wakes the consumers of a primary that commits while they
+     * still wait for its twin (the twin was squashed, so nothing else
+     * will release them).
+     */
+    void releaseRfTwinWakeup(const DynInstPtr &inst) { wakeProducer(inst); }
+
     /** Tells memory dependence unit that a memory instruction needs to be
      * rescheduled. It will re-execute once replayMemInst() is called.
      */
@@ -429,6 +436,18 @@ class IEW
     /** Runtime SHREWD enable for IEW-side squash checks. */
     bool enableShrewd;
 
+    /**
+     * RfTwin mechanism (SwapCodes, MICRO'18): a protected instruction's
+     * twin writes the result's check bits, which every consumer verifies
+     * when it reads the register. Consumers therefore wake only once both
+     * the primary and its twin have written back, and not at all if they
+     * disagree (commit then re-executes the primary, as in DIE).
+     */
+    bool rfTwin;
+
+    /** Wakes inst's consumers and marks its destinations ready. */
+    void wakeProducer(const DynInstPtr &inst);
+
     /** Number of active threads. */
     ThreadID numThreads;
 
@@ -469,6 +488,12 @@ class IEW
         statistics::Scalar memOrderViolationEvents;
         /** Stat for total number of squashes due to Shrewd fault injection. */
         statistics::Scalar shrewdFaultSquashes;
+        /** RfTwin: primaries whose consumers waited for the twin, the
+         * cycles they waited, and primaries whose consumers never woke
+         * because the twin disagreed. */
+        statistics::Scalar rfTwinDeferredWakeups;
+        statistics::Scalar rfTwinDeferCycles;
+        statistics::Scalar rfTwinMismatches;
         /** Stat for total number of incorrect predicted taken branches. */
         statistics::Scalar predictedTakenIncorrect;
         /** Stat for total number of incorrect predicted not taken branches. */

@@ -360,6 +360,14 @@ class DynInst : public ExecContext, public RefCounted
     // (seqNum + 1), and whether this instruction is such a twin.
     DynInstPtr shaftTwin;
     bool isShaftTwin_ = false;
+    // A twin's primary (not owning: a DynInstPtr would form a cycle).
+    DynInst *shaftPrimary = nullptr;
+
+    // RfTwin mechanism, on the primary: its twin has written back, its
+    // own consumers wait for the twin, and since when.
+    bool rfTwinDone_ = false;
+    bool rfTwinDeferred_ = false;
+    Cycles rfTwinDeferCycle = Cycles(0);
 
     // Cycle the instruction completed (commit saw it written back).
     Cycles shaftCompleteCycle = Cycles(0);

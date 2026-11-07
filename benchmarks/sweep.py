@@ -36,6 +36,19 @@ Experiments (default: all):
     EL  code-layout controls: the unprotected binary with N unexecuted
         bytes in front of its code (same instructions, shifted addresses),
         the noise band for every overhead
+    EX  one selection, every structure: S<L>st (S regions grown to the
+        store that writes their result) under markers, DIE (whose load and
+        store twins are CRAFT's checked stores and load-value queue),
+        RfTwin (SwapCodes: consumers wait for the twin's check bits), Diva,
+        idle units, and the protected partition (pages written by
+        protected stores are mirrored), alone and with DIE
+    EA  always-on references for EX: every instruction twinned (memory and
+        control too), checked by Diva, under RfTwin (ALU), and all memory
+        mirrored
+    EFM FT-GMRES (whole program) under RfTwin and the protected partition
+    ER  RfTwin on the S binaries, and under the stuck FloatAdd unit
+    EG  regression guard: three existing configs, to rerun into a separate
+        --results directory after a gem5 rebuild (cycles must not change)
 Each marker binary also runs with --markers-only (markers executed, nothing
 checked), which splits its overhead into the markers' and the mechanism's.
 
@@ -55,6 +68,9 @@ and ft11 reserved, otherwise identical code):
                build_coalesced_binaries.py)
     pad<N>     lbase relinked with N bytes in front of the code
                (selection_binaries_layout/, build_layout_variants.py)
+    S<L>st     S<L> with each region grown to the store that writes its
+               result (selection_binaries_store/,
+               build_store_extended_binaries.py)
 Whole programs (ftgmres/, videnc/): none, annotated, S.
 
 Layout: <checkpoints>/<bench>/<binary>/simpoint_<N>/ and
@@ -82,6 +98,7 @@ MAKE_CHECKPOINTS = SCRIPT_DIR / "make_checkpoints.py"
 SELECTION_BINARIES = SCRIPT_DIR / "selection_binaries"
 COALESCED_BINARIES = SCRIPT_DIR / "selection_binaries_coalesced"
 LAYOUT_BINARIES = SCRIPT_DIR / "selection_binaries_layout"
+STORE_BINARIES = SCRIPT_DIR / "selection_binaries_store"
 FTGMRES_DIR = SCRIPT_DIR / "ftgmres"
 VIDENC_DIR = SCRIPT_DIR / "videnc"
 
@@ -91,14 +108,14 @@ FTGMRES = "ftgmres"
 VIDENC = "videnc"
 # Whole programs (run whole in O3, interval None): directory, arguments,
 # the experiment that runs them, and the summary line they print.
-WholeProgram = namedtuple("WholeProgram", "dir args experiment output")
+WholeProgram = namedtuple("WholeProgram", "dir args experiments output")
 WHOLE = {
-    FTGMRES: WholeProgram(FTGMRES_DIR, ["64"], "EF",
+    FTGMRES: WholeProgram(FTGMRES_DIR, ["64"], ("EF", "EFM"),
                           r"status=\S+ outer=\d+ inner_failures=\d+ "
                           r"relerr=\S+"),
     # The stream goes nowhere: gem5 runs only time it (no faults injected;
     # campaign.py checks streams).
-    VIDENC: WholeProgram(VIDENC_DIR, ["enc", "/dev/null"], "EV",
+    VIDENC: WholeProgram(VIDENC_DIR, ["enc", "/dev/null"], ("EV",),
                          r"frames=\d+ bytes=\d+ sse=\d+ fallbacks=\d+ "
                          r"stream=\S+ recon=\S+"),
 }
@@ -125,6 +142,8 @@ COALESCE_GAP = 2
 LAYOUT_PADS = (2, 6, 16, 40)
 # AVF monitor interval, in committed instructions.
 AVF_INTERVAL = 100_000
+# Store-extended selections (EX).
+STORE_LEVELS = (10, 25, 50)
 
 # ── Binaries and configurations ─────────────────────────────────────────
 
@@ -147,8 +166,11 @@ def binary(bench, key):
     if key.startswith("pad"):
         return Binary(LAYOUT_BINARIES / bench / key /
                       f"{stem}.baseline.riscv", spec_run, stdin, False)
-    sel, dup, level, gap = re.fullmatch(r"([SR])(dup)?(\d+)(?:k(\d+))?",
-                                        key).groups()
+    sel, dup, level, gap, st = re.fullmatch(
+        r"([SR])(dup)?(\d+)(?:k(\d+))?(st)?", key).groups()
+    if st:
+        return Binary(STORE_BINARIES / bench / f"{sel}_{level}pct_st" /
+                      f"{stem}.secon_secoff.riscv", spec_run, stdin, False)
     if gap:
         return Binary(COALESCED_BINARIES / bench /
                       f"{sel}_{level}pct_k{gap}" /
@@ -166,12 +188,24 @@ MECHANISMS = {
     "temporal": ["--mechanism", "FuDup", "--shadow-policy", "Temporal"],
     "idlefu": ["--mechanism", "FuDup", "--shadow-policy", "SpatialWait"],
     "die": ["--mechanism", "Die"],
+    # DIE whose twin writes the result's check bits (SwapCodes): consumers
+    # wake only once the twin agrees.
+    "rftwin": ["--mechanism", "RfTwin"],
 }
 
 
 def mechanism(mech):
     """gem5 arguments of a mechanism; diva_w<W>[_x<S>] is the Diva checker
-    (spatial redundancy) with width W and its latencies scaled by S."""
+    (spatial redundancy) with width W and its latencies scaled by S.
+    <mech>_mirror adds the protected partition (pages written by protected
+    stores are mirrored), <mech>_mirrorall mirrors all memory; mirror and
+    mirrorall alone are the partition with markers only and with no
+    protection (unprotected binaries)."""
+    if mech in ("mirror", "mirrorall"):
+        mech = {"mirror": "markers_mirror", "mirrorall": "base_mirrorall"}[mech]
+    for suffix, mode in (("_mirrorall", "All"), ("_mirror", "Marked")):
+        if mech.endswith(suffix):
+            return mechanism(mech[:-len(suffix)]) + ["--partition", mode]
     diva = re.fullmatch(r"diva_w(\d+)(?:_x(\d+))?", mech)
     if diva:
         return ["--mechanism", "Diva", "--diva-width", diva.group(1),
@@ -189,18 +223,23 @@ def family_base(key):
 
 
 def run_config(key, mech, every=False, stuck=None, avf=None, alu=False,
-               domain=False):
+               domain=False, every_mem=False):
     """Binary <key> under <mech>; every: protect every ALU instruction;
     avf: protect the intervals of highest AVF holding that share of them;
     alu: of the marked instructions, only the ALU ones (FT-GMRES's
     annotation marks whole regions, loads, stores and branches included);
     domain: the same without a name suffix (coalesced regions, whose gaps
     may hold loads and stores);
-    stuck: a permanently faulty unit of that op class."""
+    stuck: a permanently faulty unit of that op class;
+    every_mem: protect every instruction, loads, stores and branches
+    included."""
     args = mechanism(mech)
     name = f"{key}_{mech}"
     if domain:
         args = args + ["--protect-domain-only"]
+    if every_mem:
+        args = args + ["--shrewd-default-on"]
+        name = f"{key}_allmem_{mech}"
     if every:
         args = args + ["--shrewd-default-on", "--protect-domain-only"]
         name = f"{key}_all_{mech}"
@@ -277,6 +316,29 @@ EXPERIMENTS = {
              for m in ("markers",) + SHARING + ("diva_w1", "diva_w2")],
     "EL": [run_config("lbase", "base")]
           + [run_config(f"pad{n}", "base") for n in LAYOUT_PADS],
+    "EX": [run_config("lbase", "base")]
+          + [run_config(f"S{lvl}st", m) for lvl in STORE_LEVELS
+             for m in ("markers", "die", "rftwin", "diva_w2", "idlefu",
+                       "mirror", "die_mirror")],
+    "EA": [run_config("lbase", "base")]
+          + [run_config("lbase", m, every_mem=True) for m in ("die",
+                                                              "diva_w2")]
+          + [run_config("lbase", "rftwin", every=True),
+             run_config("lbase", "mirrorall")],
+    "EFM": [run_config("none", "base")]
+           + [run_config("none", m, every=True) for m in ("rftwin",)]
+           + [run_config("annotated", m)
+              for m in ("rftwin", "mirror", "die_mirror")]
+           + [run_config("annotated", "rftwin", alu=True),
+              run_config("S", "rftwin"),
+              run_config("none", "mirrorall"),
+              run_config("annotated", "rftwin", stuck="FloatAdd")],
+    "ER": [run_config("lbase", "base")]
+          + levels("S", ("rftwin",))
+          + [run_config("S50", "rftwin", stuck="FloatAdd")],
+    # Regression guard for a new gem5 build: existing configs, run into a
+    # separate --results directory; cycles must equal the existing runs'.
+    "EG": [run_config("S25", m) for m in ("die", "idlefu", "diva_w2")],
 }
 
 Run = namedtuple("Run", "config bench interval weight")
@@ -288,7 +350,7 @@ def plan(exps, benches, simpoints):
     experiment only (FT-GMRES: EF; the video encoder: EV)."""
     runs = {}
     for exp in exps:
-        whole = [b for b, w in WHOLE.items() if w.experiment == exp]
+        whole = [b for b, w in WHOLE.items() if exp in w.experiments]
         for cfg in EXPERIMENTS[exp]:
             if whole:
                 for b in whole:
@@ -657,6 +719,27 @@ STATS = {
     "rob_full_events": "rename.ROBFullEvents",
     "iq_full_events": "rename.IQFullEvents",
     "branch_mispredicts": "commit.branchMispredicts",
+    "die_mem_twins": "commit.dieMemTwins",
+    "partition_stores": "commit.partitionStores",
+    "partition_migrations": "commit.partitionMigrations",
+    "partition_stall_cycles": "commit.partitionStallCycles",
+    "partition_written_pages": "commit.partitionWrittenPages",
+    "rftwin_deferred": "iew.rfTwinDeferredWakeups",
+    "rftwin_defer_cycles": "iew.rfTwinDeferCycles",
+    "rftwin_mismatches": "iew.rfTwinMismatches",
+}
+# Memory-system statistics, summed over the memory controllers (and, for
+# DRAM energy, their ranks): board.memory.mem_ctrl<N>.<suffix>.
+MEM_CTRL = re.compile(r"^board\.memory\.mem_ctrl\d+\.(?:dram\.rank\d+\.)?"
+                      r"(\w+)$")
+MEM_STATS = {
+    "writeBursts": "mem_write_bursts",
+    "readBursts": "mem_read_bursts",
+    "protectedWriteReqs": "mem_protected_write_reqs",
+    "mirrorWriteBursts": "mem_mirror_write_bursts",
+    "mirrorMergedBursts": "mem_mirror_merged_bursts",
+    "totalEnergy": "dram_energy_pj",
+    "writeEnergy": "dram_write_energy_pj",
 }
 
 
@@ -667,12 +750,24 @@ def read_stats(path):
     values = {}
     with open(path) as f:
         for line in f:
+            if line.startswith("---------- Begin Simulation Statistics"):
+                # Sums restart at each dump, so they are the last one's.
+                for key in MEM_STATS.values():
+                    values.pop(key, None)
             parts = line.split()
             if len(parts) >= 2 and parts[0] in wanted:
                 try:
                     values[wanted[parts[0]]] = float(parts[1])
                 except ValueError:
                     pass
+            elif len(parts) >= 2 and parts[0].startswith("board.memory."):
+                m = MEM_CTRL.match(parts[0])
+                if m and m.group(1) in MEM_STATS:
+                    key = MEM_STATS[m.group(1)]
+                    try:
+                        values[key] = values.get(key, 0.0) + float(parts[1])
+                    except ValueError:
+                        pass
             elif parts and parts[0] == "hostSeconds":
                 values["host_seconds"] = float(parts[1])
     return values

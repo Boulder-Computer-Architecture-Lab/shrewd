@@ -40,14 +40,16 @@ from pathlib import Path
 import pandas as pd
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-EXPERIMENTS = ("E1", "E2", "E3", "EP", "ES", "EF", "EV", "EC", "EL")
+EXPERIMENTS = ("E1", "E2", "E3", "EP", "ES", "EF", "EV", "EC", "EL", "EX",
+               "EA", "EFM", "ER")
 # povray's SimPoint 82 executed different code under different mechanisms in
 # the first sweep (its control flow depends on timing).
 EXCLUDED = {("povray", 82)}
-CONFIG = re.compile(r"(?P<key>lbase|none|annotated|S|S\d+k\d+|[SR]\d+|"
-                    r"Sdup\d+|pad\d+)"
-                    r"(?:_(?P<all>all)|_(?P<alu>alu)|_avf(?P<avf>\d+)|"
-                    r"_stuck(?P<stuck>[A-Za-z]+))?_(?P<mech>.+)")
+CONFIG = re.compile(r"(?P<key>lbase|none|annotated|S|S\d+k\d+|S\d+st|"
+                    r"[SR]\d+|Sdup\d+|pad\d+)"
+                    r"(?:_(?P<allmem>allmem)|_(?P<all>all)|_(?P<alu>alu)|"
+                    r"_avf(?P<avf>\d+)|_stuck(?P<stuck>[A-Za-z]+))?"
+                    r"_(?P<mech>.+)")
 
 
 def load(results):
@@ -55,7 +57,10 @@ def load(results):
               if (results / f"{e}.csv").exists()]
     if not frames:
         raise SystemExit(f"No <EXP>.csv in {results}: run sweep.py collect")
-    runs = pd.concat(frames).drop_duplicates(["config", "bench", "interval"])
+    # A run collected by several experiments appears once; columns only
+    # some collections have (e.g. memory statistics) are merged.
+    runs = pd.concat(frames).groupby(["config", "bench", "interval"],
+                                     dropna=False, as_index=False).first()
     runs["interval"] = runs["interval"].fillna(-1).astype(int)
     keep = [(b, i) not in EXCLUDED for b, i in zip(runs.bench, runs.interval)]
     return runs[keep]
@@ -66,14 +71,14 @@ def parse(config):
     if not m:
         raise ValueError(f"unknown config {config}")
     key = m["key"]
-    sel = re.fullmatch(r"(Sdup|S|R)(\d+)(k\d+)?", key)
+    sel = re.fullmatch(r"(Sdup|S|R)(\d+)(k\d+|st)?", key)
     return {"key": key, "mech": m["mech"],
-            "kind": ("all" if m["all"] else "avf" if m["avf"] else
-                     "alu" if m["alu"] else "stuck" if m["stuck"] else
-                     "marked"),
+            "kind": ("allmem" if m["allmem"] else "all" if m["all"] else
+                     "avf" if m["avf"] else "alu" if m["alu"] else
+                     "stuck" if m["stuck"] else "marked"),
             "sel": sel[1] + (sel[3] or "") if sel else key,
             "level": (int(sel[2]) if sel else int(m["avf"]) if m["avf"]
-                      else 100 if m["all"] else None),
+                      else 100 if m["all"] or m["allmem"] else None),
             "stuck": m["stuck"]}
 
 
@@ -121,6 +126,18 @@ def summarize(runs):
                "marker_cost": (ratio(markers, base)
                                if markers is not None and base is not None
                                else None)}
+        if base is not None and "dram_energy_pj" in rows and \
+                "dram_energy_pj" in base and base.dram_energy_pj.notna().all():
+            row["dram_energy_vs_base"] = ratio(rows, base, "dram_energy_pj")
+        if base is not None and "mem_write_bursts" in rows and \
+                "mem_write_bursts" in base and \
+                base.mem_write_bursts.notna().all():
+            def writes(r):
+                mirror = (r.mem_mirror_write_bursts.fillna(0)
+                          if "mem_mirror_write_bursts" in r else 0)
+                return r.assign(mem_writes=r.mem_write_bursts + mirror)
+            row["mem_writes_vs_base"] = ratio(writes(rows), writes(base),
+                                              "mem_writes")
         if mass:
             row["sdc_coverage"] = (rows.weight * rows.sdc_covered).sum() / mass
             row["sdc_protected"] = (rows.weight * rows.sdc_protected).sum() / mass
@@ -133,7 +150,12 @@ def summarize(runs):
                              for k in ("rob", "iq", "lsq"))
         for col in ("faults_committed", "protected_faults_committed",
                     "stuck_fu_results", "sw_dup_pairs", "sw_dup_detected",
-                    "sw_dup_undetected"):
+                    "sw_dup_undetected", "die_mem_twins", "partition_stores",
+                    "partition_migrations", "partition_stall_cycles",
+                    "partition_written_pages", "rftwin_deferred",
+                    "rftwin_defer_cycles", "rftwin_mismatches",
+                    "mem_protected_write_reqs", "mem_mirror_write_bursts",
+                    "mem_write_bursts"):
             if col in rows:
                 row[col] = rows[col].sum()
         if "stuck_fu_retire_cycle" in rows:
