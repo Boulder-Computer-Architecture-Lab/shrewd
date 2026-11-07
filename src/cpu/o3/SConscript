@@ -36,7 +36,8 @@ if env['CONF']['BUILD_ISA']:
     SimObject('BaseO3CPU.py',
         sim_objects=['BaseO3CPU'],
         enums=['SMTFetchPolicy', 'SMTQueuePolicy', 'CommitPolicy',
-               'ShadowPolicy', 'ShaftMechanism', 'DivaPolicy'])
+               'ShadowPolicy', 'ShaftMechanism', 'DivaPolicy',
+               'ShaftPartitionMode'])
 
     Source('commit.cc')
     Source('cpu.cc')
