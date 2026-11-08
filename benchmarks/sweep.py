@@ -198,14 +198,22 @@ def mechanism(mech):
     """gem5 arguments of a mechanism; diva_w<W>[_x<S>] is the Diva checker
     (spatial redundancy) with width W and its latencies scaled by S.
     <mech>_mirror adds the protected partition (pages written by protected
-    stores are mirrored), <mech>_mirrorall mirrors all memory; mirror and
-    mirrorall alone are the partition with markers only and with no
-    protection (unprotected binaries)."""
-    if mech in ("mirror", "mirrorall"):
-        mech = {"mirror": "markers_mirror", "mirrorall": "base_mirrorall"}[mech]
-    for suffix, mode in (("_mirrorall", "All"), ("_mirror", "Marked")):
+    stores are mirrored), <mech>_mirror0 the same without charging the page
+    moves (a SimPoint window starts with an empty partition, so it would pay
+    for every page it protects: _mirror0 is the steady state, and the moves
+    are counted all the same), <mech>_mirrorall mirrors all memory; mirror,
+    mirror0 and mirrorall alone are the partition with markers only and
+    with no protection (unprotected binaries)."""
+    if mech in ("mirror", "mirror0", "mirrorall"):
+        mech = {"mirror": "markers_mirror", "mirror0": "markers_mirror0",
+                "mirrorall": "base_mirrorall"}[mech]
+    for suffix, extra in (
+            ("_mirrorall", ["--partition", "All"]),
+            ("_mirror0", ["--partition", "Marked",
+                          "--partition-migrate-cycles", "0"]),
+            ("_mirror", ["--partition", "Marked"])):
         if mech.endswith(suffix):
-            return mechanism(mech[:-len(suffix)]) + ["--partition", mode]
+            return mechanism(mech[:-len(suffix)]) + extra
     diva = re.fullmatch(r"diva_w(\d+)(?:_x(\d+))?", mech)
     if diva:
         return ["--mechanism", "Diva", "--diva-width", diva.group(1),
@@ -319,7 +327,7 @@ EXPERIMENTS = {
     "EX": [run_config("lbase", "base")]
           + [run_config(f"S{lvl}st", m) for lvl in STORE_LEVELS
              for m in ("markers", "die", "rftwin", "diva_w2", "idlefu",
-                       "mirror", "die_mirror")],
+                       "mirror", "die_mirror", "mirror0", "die_mirror0")],
     "EA": [run_config("lbase", "base")]
           + [run_config("lbase", m, every_mem=True) for m in ("die",
                                                               "diva_w2")]
@@ -944,6 +952,10 @@ def main():
     parser.add_argument("-v", "--verbose", action="store_true",
                         help="list: every config and its run count")
     args = parser.parse_args()
+    # gem5 runs in the benchmark's own directory, so relative output and
+    # checkpoint paths would land there: make them absolute.
+    args.results = args.results.resolve()
+    args.checkpoints = args.checkpoints.resolve()
 
     # gem5 runs in each benchmark's run directory, so a relative path to it
     # would resolve there.

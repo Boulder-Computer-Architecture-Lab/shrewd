@@ -151,8 +151,9 @@ for core in processor.get_cores():
     if args.avf_schedule:
         sim_core.avfSchedule = str(Path(args.avf_schedule).resolve())
     sim_core.shaftDomainOnly = args.protect_domain_only
-    sim_core.shaftPartition = args.partition
-    sim_core.partitionMigrateCycles = args.partition_migrate_cycles
+    if args.partition != "Off":  # older builds lack these params
+        sim_core.shaftPartition = args.partition
+        sim_core.partitionMigrateCycles = args.partition_migrate_cycles
     if args.stuck_fu:
         op_class, _, n = args.stuck_fu.partition(":")
         sim_core.stuckFuOpClass = op_class

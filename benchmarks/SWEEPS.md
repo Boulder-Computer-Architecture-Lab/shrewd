@@ -452,7 +452,8 @@ The bit now reaches structures beyond the units, rename and commit. All new mech
 **Binaries:** `S<L>st` (`build_store_extended_binaries.py` → `selection_binaries_store/`): the S regions, each grown to the store that writes its result (window 8, no control flow), so the marks include stores, a few loads and the pages written. `--check` verified that each differs from its S binary only in marker positions. Static counts are in `stores.json`.
 
 **Experiments:**
-- **EX:** `S{10,25,50}st` × {markers, die, rftwin, diva_w2, idlefu, mirror, die_mirror}. 21 runs per config; 21 checkpoint passes.
+- **EX:** `S{10,25,50}st` × {markers, die, rftwin, diva_w2, idlefu, mirror, die_mirror, mirror0, die_mirror0}. 21 runs per config; 21 checkpoint passes.
+  - `_mirror0` charges no page moves. A SimPoint window starts with an empty partition, so with the 6000-cycle charge it pays for every page it protects: on lbm S10st, 1,502 moves were +15.9% of the window. `_mirror0` is the steady state; the moves are counted either way, and FT-GMRES, which runs whole, keeps the charge.
 - **EA:** always-on references `lbase_allmem_{die,diva_w2}` (every instruction, memory and control included), `lbase_all_rftwin`, `lbase_mirrorall`.
 - **EFM:** FT-GMRES under RfTwin and the partition.
 - **ER:** `S{10,25,50,75}_rftwin` and the stuck FloatAdd.

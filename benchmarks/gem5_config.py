@@ -180,8 +180,9 @@ for core in processor._switchable_cores["switch"]:
         core.core.avfSchedule = str(Path(args.avf_schedule).resolve())
     core.core.shaftDomainOnly = args.protect_domain_only
     core.core.dupRegNoCount = args.dup_reg_no_count
-    core.core.shaftPartition = args.partition
-    core.core.partitionMigrateCycles = args.partition_migrate_cycles
+    if args.partition != "Off":  # older builds lack these params
+        core.core.shaftPartition = args.partition
+        core.core.partitionMigrateCycles = args.partition_migrate_cycles
     if args.stuck_fu:
         op_class, _, n = args.stuck_fu.partition(":")
         core.core.stuckFuOpClass = op_class
