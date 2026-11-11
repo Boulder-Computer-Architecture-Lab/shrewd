@@ -14,6 +14,7 @@ from gem5.components.boards.simple_board import SimpleBoard
 from gem5.components.processors.simple_processor import SimpleProcessor
 from gem5.components.processors.cpu_types import CPUTypes
 from gem5.components.memory import DualChannelDDR4_2400
+from gem5.components.cachehierarchies.classic.caches.l1dcache import L1DCache
 from gem5.components.cachehierarchies.classic.private_l1_private_l2_cache_hierarchy import (
     PrivateL1PrivateL2CacheHierarchy,
 )
@@ -92,6 +93,16 @@ parser.add_argument("--partition", default="Off",
 parser.add_argument("--partition-migrate-cycles", type=int, default=6000,
                     help="Cycles commit stalls when a page moves into "
                          "the partition")
+parser.add_argument("--store-through", default="Off",
+                    choices=["Off", "Marked", "All"],
+                    help="L1D store-through: Marked, a line a protected "
+                         "store writes is store-through until evicted (its "
+                         "stores written to the L2 through a "
+                         "write-combining buffer); All, every line (a "
+                         "write-through L1D)")
+parser.add_argument("--wcb-entries", type=int, default=64,
+                    help="Store-through write-combining buffer, in lines "
+                         "(0: every store written through)")
 parser.add_argument("--markers-only", action="store_true",
                     help="Execute secon/secoff (dropped at rename) but check "
                          "nothing: the cost of the markers alone")
@@ -108,6 +119,10 @@ requires(isa_required=ISA.RISCV)
 # ---------------------------------------------------------------------------
 # Components
 # ---------------------------------------------------------------------------
+if args.store_through != "Off":  # older builds lack these params
+    # The hierarchy creates its L1D caches later, from this class.
+    L1DCache.shaft_store_through = args.store_through
+    L1DCache.shaft_wcb_entries = args.wcb_entries
 cache_hierarchy = PrivateL1PrivateL2CacheHierarchy(
     l1d_size="32kB",
     l1i_size="32kB",

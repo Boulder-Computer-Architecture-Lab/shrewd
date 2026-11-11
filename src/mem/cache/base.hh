@@ -48,7 +48,10 @@
 
 #include <cassert>
 #include <cstdint>
+#include <deque>
 #include <string>
+#include <unordered_set>
+#include <utility>
 
 #include "base/addr_range.hh"
 #include "base/compiler.hh"
@@ -58,6 +61,7 @@
 #include "debug/Cache.hh"
 #include "debug/CachePort.hh"
 #include "enums/Clusivity.hh"
+#include "enums/ShaftStoreThrough.hh"
 #include "mem/cache/cache_blk.hh"
 #include "mem/cache/cache_probe_arg.hh"
 #include "mem/cache/compressors/base.hh"
@@ -1151,6 +1155,56 @@ class BaseCache : public ClockedObject
         /** Per-command statistics */
         std::vector<std::unique_ptr<CacheCmdStats>> cmd;
     } stats;
+
+    /**
+     * SHAFT selective store-through (an L1 data cache). A line written by
+     * a protected store (Marked), or any line (All), is store-through:
+     * every store to it enters a FIFO write-combining buffer of
+     * shaftWcbEntries lines, and a line that leaves the buffer is written
+     * to the next level (a WriteClean) and left clean and writable here.
+     * Protected data is therefore never dirty only in this cache.
+     */
+    const ShaftStoreThrough shaftStoreThrough;
+    const unsigned shaftWcbEntries;
+    /** Store-through lines (Marked): block addresses, until eviction. */
+    std::unordered_set<Addr> shaftLines;
+    /** The write-combining buffer, oldest line first. */
+    std::deque<std::pair<Addr, bool>> shaftWcb;
+    std::unordered_set<Addr> shaftWcbLines;
+    /** WriteCleans made by a drain, sent with the access's writebacks. */
+    PacketList shaftWbs;
+
+    /** A store has written blk: store-through bookkeeping. */
+    void shaftNoteStore(PacketPtr pkt, CacheBlk *blk);
+    /** A line leaves the write-combining buffer: write it through. */
+    void shaftDrain(Addr addr, bool is_secure);
+    /** Move the drains' WriteCleans to an access's writeback list. */
+    void
+    shaftTakeWritebacks(PacketList &writebacks)
+    {
+        writebacks.splice(writebacks.end(), shaftWbs);
+    }
+
+    struct ShaftStats : public statistics::Group
+    {
+        ShaftStats(BaseCache &c);
+
+        /** Stores carrying the protection bit. */
+        statistics::Scalar protectedStores;
+        /** Lines made store-through by a protected store (Marked). */
+        statistics::Scalar linesMarked;
+        /** Stores to store-through lines (any code). */
+        statistics::Scalar storeThroughStores;
+        /** Of those, combined into a line already in the buffer. */
+        statistics::Scalar coalescedStores;
+        /** Lines written to the next level by the buffer (WriteCleans). */
+        statistics::Scalar writeThroughs;
+        /** Lines that left the buffer already written back or clean. */
+        statistics::Scalar drainsSkipped;
+        /** Stores after which an over-capacity buffer could not drain
+         * (write buffer full, or a drain already in this access). */
+        statistics::Scalar drainsDeferred;
+    } shaftStats;
 
     /** Registers probes. */
     void regProbePoints() override;

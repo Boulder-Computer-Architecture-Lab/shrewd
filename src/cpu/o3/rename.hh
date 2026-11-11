@@ -462,6 +462,12 @@ class Rename
     /** Instructions on x31/f31 are software-duplicate code: not counted. */
     bool dupRegNoCount;
 
+    /** Ablation of the renamed mode: 0, markers never wait; 1, secoff
+     * waits for the ROB to drain (leaving replicated mode in Nakka et
+     * al.'s selective replication); 2, both markers do (a serializing
+     * mode write). */
+    unsigned shaftModeDrain;
+
     /** Whether an instruction renamed now gets the protection bit. */
     bool protects(const StaticInstPtr &si, ThreadID tid) const;
 
@@ -578,6 +584,8 @@ class Rename
         statistics::Scalar intReturned;
         /** Number of registers freed and written back to floating point free list*/
         statistics::Scalar fpReturned;
+        /** Markers that waited for the ROB to drain (shaftModeDrain). */
+        statistics::Scalar shaftModeDrains;
     } stats;
 };
 

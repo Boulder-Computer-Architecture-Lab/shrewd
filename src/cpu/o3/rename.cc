@@ -76,6 +76,7 @@ Rename::Rename(CPU *_cpu, const BaseO3CPUParams &params)
       shaftDomainOnly(params.shaftDomainOnly),
       avfGuided(!params.avfSchedule.empty()),
       dupRegNoCount(params.dupRegNoCount),
+      shaftModeDrain(params.shaftModeDrain),
             rng(Random::genRandom()),
       numThreads(params.numThreads),
       stats(_cpu)
@@ -164,7 +165,10 @@ Rename::RenameStats::RenameStats(statistics::Group *parent)
       ADD_STAT(intReturned, statistics::units::Count::get(),
                "count of registers freed and written back to integer free list"),
       ADD_STAT(fpReturned, statistics::units::Count::get(),
-               "count of registers freed and written back to floating point free list")
+               "count of registers freed and written back to floating point free list"),
+      ADD_STAT(shaftModeDrains, statistics::units::Count::get(),
+               "SHAFT markers that waited in rename for the ROB to drain "
+               "(shaftModeDrain ablation)")
 
 {
     squashCycles.prereq(squashCycles);
@@ -728,6 +732,26 @@ Rename::renameInsts(ThreadID tid)
             ++stats.fullRegistersEvents;
 
             break;
+        }
+
+        // Ablation (shaftModeDrain): a marker that changes the mode only
+        // once every older instruction has left the ROB, as when leaving
+        // replicated mode in Nakka et al.'s selective replication (1) or
+        // with a serializing mode write (2). It waits once, in the
+        // serialize stall, and is then renamed like any marker.
+        if (shaftModeDrain != 0 && isShaftMarker(inst->staticInst) &&
+                !inst->isSerializeHandled() &&
+                (shaftModeDrain == 2 ||
+                 inst->staticInst->getName() == "secoff")) {
+            inst->setSerializeHandled();
+            if (!emptyROB[tid] || instsInProgress[tid] > 0 ||
+                    toIEWIndex > 0) {
+                ++stats.shaftModeDrains;
+                renameStatus[tid] = SerializeStall;
+                serializeInst[tid] = inst;
+                blockThisCycle = true;
+                break;
+            }
         }
 
         // Handle serializeAfter/serializeBefore instructions.

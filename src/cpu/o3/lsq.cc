@@ -56,6 +56,7 @@
 #include "debug/HtmCpu.hh"
 #include "debug/LSQ.hh"
 #include "debug/Writeback.hh"
+#include "mem/shaft_flags.hh"
 #include "params/BaseO3CPU.hh"
 
 namespace gem5
@@ -777,6 +778,11 @@ LSQ::pushRequest(const DynInstPtr& inst, bool isLoad, uint8_t *data,
 
     const bool htm_cmd = isLoad && (flags & Request::HTM_CMD);
     const bool tlbi_cmd = isLoad && (flags & Request::TLBI_CMD);
+
+    // SHAFT: a protected store carries the bit to the L1 data cache, which
+    // keeps the lines it writes store-through (shaft_store_through).
+    if (!isLoad && inst->protected_)
+        flags.set(ShaftProtectedStore);
 
     if (inst->translationStarted()) {
         request = inst->savedRequest;

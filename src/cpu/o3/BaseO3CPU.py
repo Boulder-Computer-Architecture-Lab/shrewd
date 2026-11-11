@@ -338,6 +338,13 @@ class BaseO3CPU(BaseCPU):
     stuckFuInstance = Param.Unsigned(
         0, "Which unit with stuckFuOpClass is stuck (0: the first)"
     )
+    shaftModeDrain = Param.Unsigned(
+        0,
+        "Ablation of the renamed protection mode: 0, markers never wait; "
+        "1, secoff waits in rename until the ROB drains (leaving "
+        "replicated mode in Nakka et al., DSN 2007); 2, secon and secoff "
+        "both wait (a serializing mode write)",
+    )
     shaftPartition = Param.ShaftPartitionMode(
         "Off",
         "Protected memory partition: Marked, the first protected store to "

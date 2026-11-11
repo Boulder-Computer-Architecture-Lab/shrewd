@@ -25,6 +25,9 @@ Columns, each SimPoint-weighted over the SimPoints both runs have:
   sw_dup_pairs, sw_dup_detected, sw_dup_undetected  software duplication
                    under a stuck unit (ES): pairs checked, caught (one copy
                    corrupted), passed (both corrupted alike); summed
+  page_share       protected partition: pages migrated / pages written
+                   (per window, SimPoint-weighted)
+  mirror_share     mirrored DRAM write bursts / the run's own write bursts
   crashed          SimPoints where the program crashed (a stuck unit's
                    corrupted results); they have no statistics, so every
                    other column covers the remaining SimPoints
@@ -41,7 +44,7 @@ import pandas as pd
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 EXPERIMENTS = ("E1", "E2", "E3", "EP", "ES", "EF", "EV", "EC", "EL", "EX",
-               "EA", "EFM", "ER")
+               "EA", "EAC", "EFM", "ER", "ED", "EW", "EWF")
 # povray's SimPoint 82 executed different code under different mechanisms in
 # the first sweep (its control flow depends on timing).
 EXCLUDED = {("povray", 82)}
@@ -94,7 +97,9 @@ def ratio(a, b, column="cycles"):
     a = a.set_index("interval").loc[common]
     b = b.set_index("interval").loc[common]
     w = a.weight
-    return (w * a[column]).sum() / (w * b[column]).sum() - 1
+    den = (w * b[column]).sum()
+    # 0 for runs without the event (povray and FT-GMRES write no DRAM).
+    return (w * a[column]).sum() / den - 1 if den else float("nan")
 
 
 def summarize(runs):
@@ -126,11 +131,16 @@ def summarize(runs):
                "marker_cost": (ratio(markers, base)
                                if markers is not None and base is not None
                                else None)}
+        # Runs collected before the memory statistics existed have none
+        # (NaN), so these ratios need them in both runs.
         if base is not None and "dram_energy_pj" in rows and \
-                "dram_energy_pj" in base and base.dram_energy_pj.notna().all():
+                "dram_energy_pj" in base and \
+                rows.dram_energy_pj.notna().all() and \
+                base.dram_energy_pj.notna().all():
             row["dram_energy_vs_base"] = ratio(rows, base, "dram_energy_pj")
         if base is not None and "mem_write_bursts" in rows and \
                 "mem_write_bursts" in base and \
+                rows.mem_write_bursts.notna().all() and \
                 base.mem_write_bursts.notna().all():
             def writes(r):
                 mirror = (r.mem_mirror_write_bursts.fillna(0)
@@ -138,6 +148,19 @@ def summarize(runs):
                 return r.assign(mem_writes=r.mem_write_bursts + mirror)
             row["mem_writes_vs_base"] = ratio(writes(rows), writes(base),
                                               "mem_writes")
+        if "partition_written_pages" in rows and \
+                (rows.partition_written_pages.fillna(0) > 0).all():
+            # Pages the partition holds (each migrated once per window)
+            # over the pages the window writes.
+            row["page_share"] = weighted(
+                rows.assign(s=rows.partition_migrations
+                            / rows.partition_written_pages), "s")
+        if "mem_write_bursts" in rows and rows.mem_write_bursts.notna().all() \
+                and (rows.weight * rows.mem_write_bursts).sum() > 0:
+            # Mirrored DRAM writes over the program's own write bursts.
+            row["mirror_share"] = (
+                (rows.weight * rows.mem_mirror_write_bursts.fillna(0)).sum()
+                / (rows.weight * rows.mem_write_bursts).sum())
         if mass:
             row["sdc_coverage"] = (rows.weight * rows.sdc_covered).sum() / mass
             row["sdc_protected"] = (rows.weight * rows.sdc_protected).sum() / mass
@@ -155,7 +178,13 @@ def summarize(runs):
                     "partition_written_pages", "rftwin_deferred",
                     "rftwin_defer_cycles", "rftwin_mismatches",
                     "mem_protected_write_reqs", "mem_mirror_write_bursts",
-                    "mem_write_bursts"):
+                    "mem_write_bursts", "protection_toggles",
+                    "mode_drains", "serialize_stall_cycles",
+                    "st_protected_stores", "st_lines_marked", "st_stores",
+                    "st_coalesced_stores", "st_write_throughs",
+                    "st_drains_skipped", "st_drains_deferred",
+                    "l2_writeclean",
+                    "l2_writeback_dirty", "l2_accesses", "l1d_writebacks"):
             if col in rows:
                 row[col] = rows[col].sum()
         if "stuck_fu_retire_cycle" in rows:

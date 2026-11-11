@@ -41,7 +41,7 @@ Import('*')
 
 SimObject('Cache.py', sim_objects=[
     'WriteAllocator', 'BaseCache', 'Cache', 'NoncoherentCache'],
-    enums=['Clusivity'])
+    enums=['Clusivity', 'ShaftStoreThrough'])
 
 Source('base.cc')
 Source('cache.cc')

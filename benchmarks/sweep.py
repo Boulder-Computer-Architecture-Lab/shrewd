@@ -45,10 +45,23 @@ Experiments (default: all):
     EA  always-on references for EX: every instruction twinned (memory and
         control too), checked by Diva, under RfTwin (ALU), and all memory
         mirrored
+    EAC the composed always-on reference: every instruction twinned and all
+        memory mirrored (EX's die_mirror0 against everything)
     EFM FT-GMRES (whole program) under RfTwin and the protected partition
     ER  RfTwin on the S binaries, and under the stuck FloatAdd unit
+    ED  ablation of the renamed mode: markers that drain the ROB before
+        leaving protected mode (Nakka et al.'s selective replication,
+        DSN 2007), markers only and under DIE, on the S and coalesced
+        binaries; and a serializing mode write (both markers drain)
     EG  regression guard: three existing configs, to rerun into a separate
         --results directory after a gem5 rebuild (cycles must not change)
+    EW  selective store-through L1D: S<L>st with the lines protected stores
+        write kept store-through (every store to them written to the L2
+        through a 64-line write-combining buffer), with markers only and
+        with DIE, against a write-through L1D (every line) on the
+        unprotected binary; selective at 25% and write-through without the
+        write-combining buffer (where L2 write bandwidth shows)
+    EWF the same on FT-GMRES (whole program)
 Each marker binary also runs with --markers-only (markers executed, nothing
 checked), which splits its overhead into the markers' and the mechanism's.
 
@@ -110,7 +123,7 @@ VIDENC = "videnc"
 # the experiment that runs them, and the summary line they print.
 WholeProgram = namedtuple("WholeProgram", "dir args experiments output")
 WHOLE = {
-    FTGMRES: WholeProgram(FTGMRES_DIR, ["64"], ("EF", "EFM"),
+    FTGMRES: WholeProgram(FTGMRES_DIR, ["64"], ("EF", "EFM", "EWF"),
                           r"status=\S+ outer=\d+ inner_failures=\d+ "
                           r"relerr=\S+"),
     # The stream goes nowhere: gem5 runs only time it (no faults injected;
@@ -203,11 +216,26 @@ def mechanism(mech):
     for every page it protects: _mirror0 is the steady state, and the moves
     are counted all the same), <mech>_mirrorall mirrors all memory; mirror,
     mirror0 and mirrorall alone are the partition with markers only and
-    with no protection (unprotected binaries)."""
-    if mech in ("mirror", "mirror0", "mirrorall"):
+    with no protection (unprotected binaries). <mech>_drainexit makes each
+    secoff wait in rename until the ROB drains, <mech>_drainboth each
+    marker (ablations of the renamed mode). <mech>_wt keeps the L1D lines
+    protected stores write store-through, <mech>_wt0 the same without the
+    write-combining buffer, <mech>_wtall every line (a write-through L1D),
+    <mech>_wtall0 the same without the buffer; wt, wt0, wtall and wtall0
+    alone are with markers only and with no protection."""
+    if mech in ("mirror", "mirror0", "mirrorall", "wt", "wt0", "wtall",
+                "wtall0"):
         mech = {"mirror": "markers_mirror", "mirror0": "markers_mirror0",
-                "mirrorall": "base_mirrorall"}[mech]
+                "mirrorall": "base_mirrorall", "wt": "markers_wt",
+                "wt0": "markers_wt0", "wtall": "base_wtall",
+                "wtall0": "base_wtall0"}[mech]
     for suffix, extra in (
+            ("_wtall0", ["--store-through", "All", "--wcb-entries", "0"]),
+            ("_wtall", ["--store-through", "All"]),
+            ("_wt0", ["--store-through", "Marked", "--wcb-entries", "0"]),
+            ("_wt", ["--store-through", "Marked"]),
+            ("_drainexit", ["--mode-drain", "Exit"]),
+            ("_drainboth", ["--mode-drain", "Both"]),
             ("_mirrorall", ["--partition", "All"]),
             ("_mirror0", ["--partition", "Marked",
                           "--partition-migrate-cycles", "0"]),
@@ -333,6 +361,10 @@ EXPERIMENTS = {
                                                               "diva_w2")]
           + [run_config("lbase", "rftwin", every=True),
              run_config("lbase", "mirrorall")],
+    # The composed always-on reference for EX's die_mirror0: every
+    # instruction twinned (memory and control too) and all memory mirrored.
+    "EAC": [run_config("lbase", "base"),
+            run_config("lbase", "die_mirrorall", every_mem=True)],
     "EFM": [run_config("none", "base")]
            + [run_config("none", m, every=True) for m in ("rftwin",)]
            + [run_config("annotated", m)
@@ -344,6 +376,25 @@ EXPERIMENTS = {
     "ER": [run_config("lbase", "base")]
           + levels("S", ("rftwin",))
           + [run_config("S50", "rftwin", stuck="FloatAdd")],
+    # The renamed mode against a mode switch that drains the pipeline.
+    "ED": [run_config("lbase", "base")]
+          + levels("S", ("markers_drainexit", "die_drainexit"),
+                   at=STORE_LEVELS)
+          + [run_config("S25", "die_drainboth")]
+          + [run_config(f"S25k{COALESCE_GAP}", m, domain=True)
+             for m in ("markers_drainexit", "die_drainexit")],
+    # Selective store-through L1D (the lines protected stores write) vs a
+    # write-through L1D. S<L>st_markers and S<L>st_die are EX's runs.
+    "EW": [run_config("lbase", "base"), run_config("lbase", "wtall"),
+           run_config("lbase", "wtall0"),
+           run_config("lbase", "die_wtall", every_mem=True)]
+          + [run_config(f"S{lvl}st", m) for lvl in STORE_LEVELS
+             for m in ("markers", "wt", "die", "die_wt")]
+          + [run_config("S25st", "wt0")],
+    "EWF": [run_config("none", "base"), run_config("none", "wtall"),
+            run_config("none", "wtall0")]
+           + [run_config("annotated", m)
+              for m in ("markers", "wt", "die", "die_wt", "wt0")],
     # Regression guard for a new gem5 build: existing configs, run into a
     # separate --results directory; cycles must equal the existing runs'.
     "EG": [run_config("S25", m) for m in ("die", "idlefu", "diva_w2")],
@@ -735,7 +786,26 @@ STATS = {
     "rftwin_deferred": "iew.rfTwinDeferredWakeups",
     "rftwin_defer_cycles": "iew.rfTwinDeferCycles",
     "rftwin_mismatches": "iew.rfTwinMismatches",
+    "mode_drains": "rename.shaftModeDrains",
+    "serialize_stall_cycles": "rename.serializeStallCycles",
 }
+# Cache statistics (one core): the L1D's store-through and the L2 traffic.
+CACHE_STATS = {
+    "board.cache_hierarchy.l1d-cache-0.shaft." + k: v for k, v in (
+        ("protectedStores", "st_protected_stores"),
+        ("linesMarked", "st_lines_marked"),
+        ("storeThroughStores", "st_stores"),
+        ("coalescedStores", "st_coalesced_stores"),
+        ("writeThroughs", "st_write_throughs"),
+        ("drainsSkipped", "st_drains_skipped"),
+        ("drainsDeferred", "st_drains_deferred"))}
+CACHE_STATS.update({
+    "board.cache_hierarchy.l2-cache-0." + k: v for k, v in (
+        ("WriteClean.accesses::total", "l2_writeclean"),
+        ("WritebackDirty.accesses::total", "l2_writeback_dirty"),
+        ("overallAccesses::total", "l2_accesses"))})
+CACHE_STATS["board.cache_hierarchy.l1d-cache-0.writebacks::total"] = \
+    "l1d_writebacks"
 # Memory-system statistics, summed over the memory controllers (and, for
 # DRAM energy, their ranks): board.memory.mem_ctrl<N>.<suffix>.
 MEM_CTRL = re.compile(r"^board\.memory\.mem_ctrl\d+\.(?:dram\.rank\d+\.)?"
@@ -776,6 +846,11 @@ def read_stats(path):
                         values[key] = values.get(key, 0.0) + float(parts[1])
                     except ValueError:
                         pass
+            elif len(parts) >= 2 and parts[0] in CACHE_STATS:
+                try:
+                    values[CACHE_STATS[parts[0]]] = float(parts[1])
+                except ValueError:
+                    pass
             elif parts and parts[0] == "hostSeconds":
                 values["host_seconds"] = float(parts[1])
     return values

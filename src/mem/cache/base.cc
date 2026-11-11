@@ -60,6 +60,7 @@
 #include "mem/cache/tags/compressed_tags.hh"
 #include "mem/cache/tags/partitioning_policies/partition_manager.hh"
 #include "mem/cache/tags/super_blk.hh"
+#include "mem/shaft_flags.hh"
 #include "params/BaseCache.hh"
 #include "params/WriteAllocator.hh"
 #include "sim/cur_tick.hh"
@@ -114,7 +115,10 @@ BaseCache::BaseCache(const BaseCacheParams &p, unsigned blk_size)
       missCount(p.max_miss_count),
       addrRanges(p.addr_ranges.begin(), p.addr_ranges.end()),
       system(p.system),
-      stats(*this)
+      stats(*this),
+      shaftStoreThrough(p.shaft_store_through),
+      shaftWcbEntries(p.shaft_wcb_entries),
+      shaftStats(*this)
 {
     // the MSHR queue has no reserve entries as we check the MSHR
     // queue on every single allocation, whereas the write queue has
@@ -433,6 +437,7 @@ BaseCache::recvTimingReq(PacketPtr pkt)
         // Note that lat is passed by reference here. The function
         // access() will set the lat value.
         satisfied = access(pkt, blk, lat, writebacks);
+        shaftTakeWritebacks(writebacks);
 
         // After the evicted blocks are selected, they must be forwarded
         // to the write buffer to ensure they logically precede anything
@@ -627,6 +632,7 @@ BaseCache::recvTimingResp(PacketPtr pkt)
     }
 
     const Tick forward_time = clockEdge(forwardLatency) + pkt->headerDelay;
+    shaftTakeWritebacks(writebacks);
     // copy writebacks to write buffer
     doWritebacks(writebacks, forward_time);
 
@@ -1190,6 +1196,86 @@ BaseCache::satisfyRequest(PacketPtr pkt, CacheBlk *blk, bool, bool)
         DPRINTF(CacheVerbose, "%s for %s (invalidation)\n", __func__,
                 pkt->print());
     }
+
+    // SHAFT store-through: a store from the core has written the line
+    // (timing mode only: the atomic warm-up is not measured).
+    if (shaftStoreThrough != ShaftStoreThrough::Off &&
+            blk != tempBlock && blk->isValid() &&
+            blk->isSet(CacheBlk::DirtyBit) && !pkt->fromCache() &&
+            (pkt->isWrite() || pkt->isAtomicOp()) &&
+            system->isTimingMode()) {
+        shaftNoteStore(pkt, blk);
+    }
+}
+
+void
+BaseCache::shaftNoteStore(PacketPtr pkt, CacheBlk *blk)
+{
+    const Addr line = regenerateBlkAddr(blk);
+    const bool is_protected =
+        pkt->req->getFlags().isSet(ShaftProtectedStore);
+    if (is_protected)
+        ++shaftStats.protectedStores;
+    // All: every line is store-through. Marked: a protected store makes
+    // its line store-through; other stores follow the line.
+    bool store_through = shaftStoreThrough == ShaftStoreThrough::All;
+    if (!store_through) {
+        if (is_protected) {
+            if (shaftLines.insert(line).second)
+                ++shaftStats.linesMarked;
+            store_through = true;
+        } else {
+            store_through = shaftLines.count(line) > 0;
+        }
+    }
+    if (store_through) {
+        ++shaftStats.storeThroughStores;
+        if (shaftWcbLines.count(line)) {
+            ++shaftStats.coalescedStores;
+        } else {
+            shaftWcb.emplace_back(line, blk->isSecure());
+            shaftWcbLines.insert(line);
+        }
+    }
+    // Over capacity, the oldest line is written through: one per access,
+    // and only while the write buffer has room outside the entries it
+    // reserves for fills. Otherwise the line waits for a later store (a
+    // full write buffer also blocks the cache to the core, so stores wait
+    // as they would behind a full write-combining buffer).
+    if (shaftWcb.size() > shaftWcbEntries) {
+        if (shaftWbs.empty() && !writeBuffer.isFull()) {
+            const auto [oldest, is_secure] = shaftWcb.front();
+            shaftWcb.pop_front();
+            shaftWcbLines.erase(oldest);
+            shaftDrain(oldest, is_secure);
+        } else {
+            ++shaftStats.drainsDeferred;
+        }
+    }
+}
+
+void
+BaseCache::shaftDrain(Addr addr, bool is_secure)
+{
+    CacheBlk *blk = tags->findBlock({addr, is_secure});
+    if (!blk || !blk->isValid() || !blk->isSet(CacheBlk::DirtyBit)) {
+        // Evicted (its write-back carried the data) or already clean.
+        ++shaftStats.drainsSkipped;
+        return;
+    }
+    // Write the line to the next level and keep it here clean. The line
+    // stays writable: a store-through cache does not give up the line to
+    // write it through, so later stores need no upgrade. Clearing the bit
+    // first makes the WriteClean say so (it passes the data, not
+    // ownership); the next level keeps the only dirty copy until a later
+    // store dirties this one again.
+    const bool writable = blk->isSet(CacheBlk::WritableBit);
+    blk->clearCoherenceBits(CacheBlk::WritableBit);
+    PacketPtr wb_pkt = writecleanBlk(blk, 0, 0);
+    if (writable)
+        blk->setCoherenceBits(CacheBlk::WritableBit);
+    shaftWbs.push_back(wb_pkt);
+    ++shaftStats.writeThroughs;
 }
 
 /////////////////////////////////////////////////////
@@ -1680,6 +1766,10 @@ BaseCache::allocateBlock(const PacketPtr pkt, PacketList &writebacks)
 void
 BaseCache::invalidateBlock(CacheBlk *blk)
 {
+    // A store-through line stops being one when it leaves the cache.
+    if (!shaftLines.empty() && blk != tempBlock && blk->isValid())
+        shaftLines.erase(regenerateBlkAddr(blk));
+
     // If block is still marked as prefetched, then it hasn't been used
     if (blk->wasPrefetched()) {
         prefetcher->prefetchUnused();
@@ -2294,6 +2384,28 @@ BaseCache::CacheStats::CacheStats(BaseCache &c)
 {
     for (int idx = 0; idx < MemCmd::NUM_MEM_CMDS; ++idx)
         cmd[idx].reset(new CacheCmdStats(c, MemCmd(idx).toString()));
+}
+
+BaseCache::ShaftStats::ShaftStats(BaseCache &c)
+    : statistics::Group(&c, "shaft"),
+    ADD_STAT(protectedStores, statistics::units::Count::get(),
+             "Stores carrying the SHAFT protection bit"),
+    ADD_STAT(linesMarked, statistics::units::Count::get(),
+             "Lines made store-through by a protected store"),
+    ADD_STAT(storeThroughStores, statistics::units::Count::get(),
+             "Stores to store-through lines"),
+    ADD_STAT(coalescedStores, statistics::units::Count::get(),
+             "Stores combined into a line already in the write-combining "
+             "buffer"),
+    ADD_STAT(writeThroughs, statistics::units::Count::get(),
+             "Lines written through to the next level (WriteCleans)"),
+    ADD_STAT(drainsSkipped, statistics::units::Count::get(),
+             "Lines that left the write-combining buffer already written "
+             "back or clean"),
+    ADD_STAT(drainsDeferred, statistics::units::Count::get(),
+             "Stores after which an over-capacity write-combining buffer "
+             "could not drain")
+{
 }
 
 void

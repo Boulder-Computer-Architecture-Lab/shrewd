@@ -52,6 +52,10 @@ class Clusivity(Enum):
     vals = ["mostly_incl", "mostly_excl"]
 
 
+class ShaftStoreThrough(ScopedEnum):
+    vals = ["Off", "Marked", "All"]
+
+
 class WriteAllocator(SimObject):
     type = "WriteAllocator"
     cxx_header = "mem/cache/cache.hh"
@@ -168,6 +172,24 @@ class BaseCache(ClockedObject):
     # in the current cache. Typically, this would be enabled in the
     # data cache.
     write_allocator = Param.WriteAllocator(NULL, "Write allocator")
+
+    # SHAFT selective store-through, for an L1 data cache whose next level
+    # has ECC: the lines it writes through stay clean here, so parity is
+    # enough to recover them (invalidate and refetch). Marked: a line a
+    # protected store writes (ShaftProtectedStore) is store-through until
+    # it leaves the cache, for every store to it; All: every line, as in a
+    # write-through L1 data cache. Off: write-back.
+    shaft_store_through = Param.ShaftStoreThrough(
+        "Off", "SHAFT store-through mode (an L1 data cache)"
+    )
+    # Stores to store-through lines are combined per line in a FIFO
+    # write-combining buffer; a line is written through (one WriteClean to
+    # the next level) when it leaves the buffer. 64 lines is the 4 KiB
+    # write-coalescing cache of AMD's write-through L1 (Bulldozer); 0
+    # writes every store through.
+    shaft_wcb_entries = Param.Unsigned(
+        64, "SHAFT store-through write-combining buffer entries (lines)"
+    )
 
 
 class Cache(BaseCache):
